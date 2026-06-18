@@ -1,0 +1,10 @@
+node_modules
+dist
+.vite
+.npm-cache
+.DS_Store
+*.log
+*.tsbuildinfo
+src-tauri/target
+src-tauri/gen
+*.cr-replay.json
