@@ -12,6 +12,7 @@
       "identifier": "fs:scope",
       "allow": [
         { "path": "$HOME/**" },
+        { "path": "$EXE/**" },
         { "path": "$APPLOCALDATA/**" },
         { "path": "$DOCUMENT/**" },
         { "path": "$DESKTOP/**" },

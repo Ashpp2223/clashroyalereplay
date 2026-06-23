@@ -1,11 +1,6 @@
 import type { CardData } from "../domain/types.ts";
 
 export const DEFAULT_CARDS: CardData[] = [
-  { id: "tower_princess", name: "皇家塔公主", cost: 0, imagePath: "/cards/tower-princess.png", cardType: "building" },
-  { id: "baby_goblins", name: "小哥布林", cost: 0, imagePath: "/cards/baby-goblins.png", cardType: "troop" },
-  { id: "cannoneer", name: "炮兵", cost: 0, imagePath: "/cards/cannoneer.png", cardType: "building" },
-  { id: "dagger_duchess", name: "飞刀女爵", cost: 0, imagePath: "/cards/dagger-duchess.png", cardType: "building" },
-  { id: "royal_chef", name: "皇室大厨", cost: 0, imagePath: "/cards/royal-chef.png", cardType: "building" },
   { id: "skeletons", name: "骷髅兵", cost: 1, imagePath: "/cards/skeletons.png", cardType: "troop" },
   { id: "evolved_skeletons", name: "觉醒骷髅兵", cost: 1, imagePath: "/cards/evolved-skeletons.png", cardType: "troop" },
   { id: "fire_spirit", name: "烈焰精灵", cost: 1, imagePath: "/cards/fire-spirit.png", cardType: "troop" },

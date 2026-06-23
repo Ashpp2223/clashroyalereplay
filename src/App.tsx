@@ -32,6 +32,7 @@ import {
   downloadProject,
   getDefaultSavesDirectory,
   isTauriDesktop,
+  chooseSavesDirectory,
   listSavedProjects,
   openProjectFromNativeDialog,
   openSavedProject,
@@ -109,11 +110,13 @@ const UI_TEXT = {
       newProject: "已创建新节点树。",
       openedPath: (path: string) => `已打开本地文件：${path}`,
       openedFile: (name: string) => `已打开 ${name}。`,
-      openFailed: "打开失败：JSON 格式不正确，或没有文件读取权限。",
-      openDefaultFailed: "打开默认存档失败：JSON 格式不正确，或文件不可读取。",
-      openJsonFailed: "打开失败：JSON 格式不正确。",
+      openFailed: "打开失败：文件格式不正确，或没有文件读取权限。",
+      openDefaultFailed: "打开默认存档失败：文件格式不正确，或文件不可读取。",
+      openJsonFailed: "打开失败：文件格式不正确。",
       savedPath: (path: string) => `已保存到本地文件：${path}`,
       saveFailed: "保存失败：没有文件写入权限，或目标路径不可写。",
+      saveDirChanged: (path: string) => `保存位置已更改：${path}`,
+      saveDirChangeFailed: "更改保存位置失败：没有目录权限，或目标位置不可用。",
       cardNotInHand: (side: string, card: string) => `${side}当前手牌里没有 ${card}，未执行出牌。`,
       playedCard: (side: string, card: string) => `${side}打出 ${card}；已更新 snapshot，并追加动作日志。`,
       childCreated: "已创建子节点：复制父节点局面和单位，动作与备注为空。",
@@ -144,8 +147,8 @@ const UI_TEXT = {
     top: {
       archive: "存档页",
       new: "新建",
-      open: "打开 JSON",
-      save: "保存 JSON",
+      open: "打开",
+      save: "保存",
       undo: "撤回",
       deck: "卡组设置",
       help: "使用说明",
@@ -158,7 +161,8 @@ const UI_TEXT = {
       refresh: "刷新",
       newTree: "新建节点树",
       openOther: "打开其他保存的节点树",
-      defaultDir: "默认存档目录：",
+      changeDir: "更改保存位置",
+      defaultDir: "保存位置：",
       loading: "正在读取存档...",
       empty: "暂无默认存档。",
       unknownTime: "时间未知"
@@ -291,11 +295,7 @@ const UI_TEXT = {
         "右键单位：删除单位标记。",
         "动作日志里的“拖动排序”：调整动作顺序，不会重算 snapshot。"
       ],
-      layoutTitle: "窗口和显示",
-      layout: [
-        "窗口较小时页面会整体缩小，避免必须全屏才能使用。",
-        "各面板保留内部滚动；竞技场格子始终保持方格和 18:32 比例。"
-      ]
+      credit: "由Ashpp制作 哔哩哔哩主页https://space.bilibili.com/43867976?spm_id_from=333.1007.0.0"
     }
   },
   en: {
@@ -324,11 +324,13 @@ const UI_TEXT = {
       newProject: "Created a new replay tree.",
       openedPath: (path: string) => `Opened local file: ${path}`,
       openedFile: (name: string) => `Opened ${name}.`,
-      openFailed: "Open failed: invalid JSON or no read permission.",
-      openDefaultFailed: "Failed to open the default save: invalid JSON or unreadable file.",
-      openJsonFailed: "Open failed: invalid JSON.",
+      openFailed: "Open failed: invalid file format or no read permission.",
+      openDefaultFailed: "Failed to open the default save: invalid file format or unreadable file.",
+      openJsonFailed: "Open failed: invalid file format.",
       savedPath: (path: string) => `Saved to local file: ${path}`,
       saveFailed: "Save failed: no write permission or the target path is not writable.",
+      saveDirChanged: (path: string) => `Save folder changed: ${path}`,
+      saveDirChangeFailed: "Failed to change save folder: no folder permission or the target is unavailable.",
       cardNotInHand: (side: string, card: string) => `${side} does not have ${card} in hand. Play was not recorded.`,
       playedCard: (side: string, card: string) => `${side} played ${card}; snapshot and action log updated.`,
       childCreated: "Created a child node: copied position and units; actions and note are empty.",
@@ -359,8 +361,8 @@ const UI_TEXT = {
     top: {
       archive: "Saves",
       new: "New",
-      open: "Open JSON",
-      save: "Save JSON",
+      open: "Open",
+      save: "Save",
       undo: "Undo",
       deck: "Decks",
       help: "Help",
@@ -373,7 +375,8 @@ const UI_TEXT = {
       refresh: "Refresh",
       newTree: "New Replay Tree",
       openOther: "Open Other Replay Tree",
-      defaultDir: "Default save folder: ",
+      changeDir: "Change Save Folder",
+      defaultDir: "Save folder: ",
       loading: "Reading saves...",
       empty: "No default saves yet.",
       unknownTime: "Unknown time"
@@ -506,11 +509,7 @@ const UI_TEXT = {
         "Right click a unit: delete the unit marker.",
         "Drag to sort in the action log: changes action order without recalculating snapshot."
       ],
-      layoutTitle: "Window and display",
-      layout: [
-        "When the window is small, the whole page scales down so fullscreen is not required.",
-        "Panels keep their own scrolling; the arena keeps square cells and an 18:32 ratio."
-      ]
+      credit: "由Ashpp制作 哔哩哔哩主页https://space.bilibili.com/43867976?spm_id_from=333.1007.0.0"
     }
   }
 } as const;
@@ -749,6 +748,26 @@ function App() {
       setArchiveNotice(ui.notice.archiveReadFailed);
     } finally {
       setArchiveLoading(false);
+    }
+  }
+
+  async function handleChooseSavesDirectory(): Promise<void> {
+    if (!isTauriDesktop()) {
+      return;
+    }
+
+    try {
+      const directory = await chooseSavesDirectory();
+      if (!directory) {
+        return;
+      }
+
+      await refreshSavedProjects();
+      setSavesDirectory(directory);
+      setCurrentFilePath(null);
+      setArchiveNotice(ui.notice.saveDirChanged(directory));
+    } catch {
+      setArchiveNotice(ui.notice.saveDirChangeFailed);
     }
   }
 
@@ -1411,6 +1430,7 @@ function App() {
           onNewProject={handleNewProject}
           onOpenProjectClick={handleOpenProjectClick}
           onOpenSavedProject={handleOpenSavedProject}
+          onChooseSavesDirectory={handleChooseSavesDirectory}
           onRefresh={refreshSavedProjects}
         />
         {helpOpen ? <HelpModal language={language} onToggleLanguage={toggleLanguage} onClose={closeHelp} /> : null}
@@ -1740,6 +1760,7 @@ function ArchivePage({
   onNewProject,
   onOpenProjectClick,
   onOpenSavedProject,
+  onChooseSavesDirectory,
   onRefresh
 }: {
   savedProjects: SavedProjectInfo[];
@@ -1755,6 +1776,7 @@ function ArchivePage({
   onNewProject: () => void;
   onOpenProjectClick: () => Promise<void>;
   onOpenSavedProject: (path: string) => Promise<void>;
+  onChooseSavesDirectory: () => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
   const ui = useUi();
@@ -1783,6 +1805,7 @@ function ArchivePage({
             {ui.archive.newTree}
           </button>
           <button onClick={() => void onOpenProjectClick()}>{ui.archive.openOther}</button>
+          <button onClick={() => void onChooseSavesDirectory()}>{ui.archive.changeDir}</button>
         </div>
 
         <div className="archive-notice">{notice}</div>
@@ -1854,7 +1877,7 @@ function HelpModal({
           <HelpSection title={ui.help.overviewTitle} items={ui.help.overview} />
           <HelpSection title={ui.help.workflowTitle} items={ui.help.workflow} />
           <HelpSection title={ui.help.shortcutsTitle} items={ui.help.shortcuts} />
-          <HelpSection title={ui.help.layoutTitle} items={ui.help.layout} />
+          <p className="help-credit">{ui.help.credit}</p>
         </div>
       </section>
     </div>

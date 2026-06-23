@@ -11,7 +11,15 @@ export type SavedProjectInfo = {
   updatedAt?: number;
 };
 
+type NativeSavedProjectInfo = {
+  name: string;
+  path: string;
+  updated_at?: number | null;
+};
+
+const DEFAULT_DATA_DIR = "data";
 const DEFAULT_SAVE_DIR = "saves";
+const SAVE_DIR_STORAGE_KEY = "clash-replay-tree.savesDirectory";
 
 export function downloadProject(project: ReplayProject): void {
   const filename = `${sanitizeFilename(project.projectName)}.cr-replay.json`;
@@ -49,8 +57,41 @@ export async function getDefaultSavesDirectory(): Promise<string | null> {
     return null;
   }
 
-  const { appLocalDataDir, join } = await import("@tauri-apps/api/path");
-  return join(await appLocalDataDir(), DEFAULT_SAVE_DIR);
+  const storedDirectory = readStoredSavesDirectory();
+  if (storedDirectory && (await ensureWritableDirectory(storedDirectory))) {
+    return storedDirectory;
+  }
+
+  const bundledDirectory = await getBundledSavesDirectory().catch(() => null);
+  if (bundledDirectory && (await ensureWritableDirectory(bundledDirectory))) {
+    return bundledDirectory;
+  }
+
+  const fallbackDirectory = await getFallbackSavesDirectory();
+  await requireWritableDirectory(fallbackDirectory);
+  return fallbackDirectory;
+}
+
+export async function chooseSavesDirectory(): Promise<string | null> {
+  if (!isTauriDesktop()) {
+    return null;
+  }
+
+  const [{ open }] = await Promise.all([import("@tauri-apps/plugin-dialog")]);
+  const currentDirectory = await getDefaultSavesDirectory();
+  const selectedPath = await open({
+    directory: true,
+    multiple: false,
+    defaultPath: currentDirectory ?? undefined
+  });
+
+  if (!selectedPath || Array.isArray(selectedPath)) {
+    return null;
+  }
+
+  await requireWritableDirectory(selectedPath);
+  storeSavesDirectory(selectedPath);
+  return selectedPath;
 }
 
 export async function listSavedProjects(): Promise<SavedProjectInfo[]> {
@@ -58,28 +99,17 @@ export async function listSavedProjects(): Promise<SavedProjectInfo[]> {
     return [];
   }
 
-  const [{ join }, { BaseDirectory, mkdir, readDir, stat }] = await Promise.all([
-    import("@tauri-apps/api/path"),
-    import("@tauri-apps/plugin-fs")
-  ]);
-  await mkdir(DEFAULT_SAVE_DIR, { baseDir: BaseDirectory.AppLocalData, recursive: true });
   const savesDirectory = await getDefaultSavesDirectory();
-  const entries = await readDir(DEFAULT_SAVE_DIR, { baseDir: BaseDirectory.AppLocalData });
-  const files = entries.filter((entry) => entry.isFile && entry.name.toLowerCase().endsWith(".json"));
+  if (!savesDirectory) {
+    return [];
+  }
 
-  const items = await Promise.all(
-    files.map(async (entry) => {
-      const relativePath = `${DEFAULT_SAVE_DIR}/${entry.name}`;
-      const fileInfo = await stat(relativePath, { baseDir: BaseDirectory.AppLocalData }).catch(() => null);
-      return {
-        name: entry.name,
-        path: savesDirectory ? await join(savesDirectory, entry.name) : relativePath,
-        updatedAt: getFileTimestamp(fileInfo)
-      };
-    })
-  );
-
-  return items.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  const files = await invokeNative<NativeSavedProjectInfo[]>("list_project_files", { path: savesDirectory });
+  return files.map((file) => ({
+    name: file.name,
+    path: file.path,
+    updatedAt: file.updated_at ?? undefined
+  }));
 }
 
 export async function openSavedProject(path: string): Promise<NativeOpenResult> {
@@ -87,11 +117,7 @@ export async function openSavedProject(path: string): Promise<NativeOpenResult> 
     throw new Error("Native file APIs are unavailable.");
   }
 
-  const { BaseDirectory, readTextFile } = await import("@tauri-apps/plugin-fs");
-  const defaultRelativePath = await getDefaultSaveRelativePath(path);
-  const text = defaultRelativePath
-    ? await readTextFile(defaultRelativePath, { baseDir: BaseDirectory.AppLocalData })
-    : await readTextFile(path);
+  const text = await readProjectText(path);
   return {
     path,
     raw: JSON.parse(text)
@@ -103,20 +129,19 @@ export async function openProjectFromNativeDialog(): Promise<NativeOpenResult | 
     return null;
   }
 
-  const [{ open }, { readTextFile }] = await Promise.all([
-    import("@tauri-apps/plugin-dialog"),
-    import("@tauri-apps/plugin-fs")
-  ]);
+  const [{ open }] = await Promise.all([import("@tauri-apps/plugin-dialog")]);
+  const defaultPath = await getDefaultSavesDirectory();
   const selectedPath = await open({
     multiple: false,
-    filters: [{ name: "Replay JSON", extensions: ["json"] }]
+    defaultPath: defaultPath ?? undefined,
+    filters: [{ name: "Replay File", extensions: ["json"] }]
   });
 
   if (!selectedPath || Array.isArray(selectedPath)) {
     return null;
   }
 
-  const text = await readTextFile(selectedPath);
+  const text = await readProjectText(selectedPath);
   return {
     path: selectedPath,
     raw: JSON.parse(text)
@@ -131,37 +156,87 @@ export async function saveProjectToNativeFile(
     return null;
   }
 
-  const [{ appLocalDataDir, join }, { BaseDirectory, mkdir, writeTextFile }] = await Promise.all([
-    import("@tauri-apps/api/path"),
-    import("@tauri-apps/plugin-fs")
-  ]);
-  await mkdir(DEFAULT_SAVE_DIR, { baseDir: BaseDirectory.AppLocalData, recursive: true });
-  const savesDirectory = await join(await appLocalDataDir(), DEFAULT_SAVE_DIR);
+  const { join } = await import("@tauri-apps/api/path");
+  const savesDirectory = await getDefaultSavesDirectory();
+  if (!savesDirectory) {
+    return null;
+  }
+
   const defaultFilename = getDefaultProjectFilename(project);
-  const defaultRelativePath =
-    currentPath === null
-      ? `${DEFAULT_SAVE_DIR}/${defaultFilename}`
-      : await getDefaultSaveRelativePath(currentPath, savesDirectory);
   const targetPath = currentPath ?? (await join(savesDirectory, defaultFilename));
 
   if (!targetPath) {
     return null;
   }
 
-  if (defaultRelativePath) {
-    const normalizedRelativePath = defaultRelativePath.toLowerCase().endsWith(".json")
-      ? defaultRelativePath
-      : `${defaultRelativePath}.cr-replay.json`;
-    await writeTextFile(normalizedRelativePath, JSON.stringify(project, null, 2), {
-      baseDir: BaseDirectory.AppLocalData
-    });
-    const filename = normalizedRelativePath.split("/").pop() ?? getDefaultProjectFilename(project);
-    return join(savesDirectory, filename);
+  const normalizedPath = targetPath.toLowerCase().endsWith(".json") ? targetPath : `${targetPath}.cr-replay.json`;
+  const data = JSON.stringify(project, null, 2);
+  try {
+    await writeProjectText(normalizedPath, data);
+    return normalizedPath;
+  } catch (error) {
+    if (currentPath === null) {
+      throw error;
+    }
   }
 
-  const normalizedPath = targetPath.toLowerCase().endsWith(".json") ? targetPath : `${targetPath}.cr-replay.json`;
-  await writeTextFile(normalizedPath, JSON.stringify(project, null, 2));
-  return normalizedPath;
+  const fallbackPath = await join(savesDirectory, defaultFilename);
+  await writeProjectText(fallbackPath, data);
+  return fallbackPath;
+}
+
+async function getBundledSavesDirectory(): Promise<string> {
+  const { join } = await import("@tauri-apps/api/path");
+  return join(await invokeNative<string>("executable_directory", {}), DEFAULT_DATA_DIR, DEFAULT_SAVE_DIR);
+}
+
+async function getFallbackSavesDirectory(): Promise<string> {
+  const { appLocalDataDir, join } = await import("@tauri-apps/api/path");
+  return join(await appLocalDataDir(), DEFAULT_DATA_DIR, DEFAULT_SAVE_DIR);
+}
+
+async function requireWritableDirectory(path: string): Promise<void> {
+  if (!(await ensureWritableDirectory(path))) {
+    throw new Error("Save directory is not writable.");
+  }
+}
+
+async function ensureWritableDirectory(path: string): Promise<boolean> {
+  try {
+    await invokeNative("ensure_writable_directory", { path });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readProjectText(path: string): Promise<string> {
+  return invokeNative<string>("read_project_file", { path });
+}
+
+async function writeProjectText(path: string, data: string): Promise<void> {
+  await invokeNative("write_project_file", { path, data });
+}
+
+async function invokeNative<T = void>(command: string, args: Record<string, unknown>): Promise<T> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(command, args);
+}
+
+function readStoredSavesDirectory(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.localStorage.getItem(SAVE_DIR_STORAGE_KEY)?.trim() || null;
+}
+
+function storeSavesDirectory(path: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(SAVE_DIR_STORAGE_KEY, path);
 }
 
 function getDefaultProjectFilename(project: ReplayProject): string {
@@ -183,44 +258,4 @@ function formatFilenameTimestamp(value: string): string {
   const minute = String(safeDate.getMinutes()).padStart(2, "0");
   const second = String(safeDate.getSeconds()).padStart(2, "0");
   return `${year}${month}${day}-${hour}${minute}${second}`;
-}
-
-async function getDefaultSaveRelativePath(
-  path: string,
-  knownSavesDirectory?: string
-): Promise<string | null> {
-  const savesDirectory = knownSavesDirectory ?? (await getDefaultSavesDirectory());
-  if (!savesDirectory) {
-    return null;
-  }
-
-  const normalizedDirectory = normalizePathForCompare(savesDirectory);
-  const normalizedPath = normalizePathForCompare(path);
-  if (!normalizedPath.startsWith(`${normalizedDirectory}/`)) {
-    return null;
-  }
-
-  const filename = path.split(/[\\/]/).pop();
-  return filename ? `${DEFAULT_SAVE_DIR}/${filename}` : null;
-}
-
-function normalizePathForCompare(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
-}
-
-function getFileTimestamp(fileInfo: unknown): number | undefined {
-  if (!fileInfo || typeof fileInfo !== "object") {
-    return undefined;
-  }
-
-  const maybeInfo = fileInfo as { mtime?: unknown; modifiedAt?: unknown };
-  const rawDate = maybeInfo.mtime ?? maybeInfo.modifiedAt;
-  if (rawDate instanceof Date) {
-    return rawDate.getTime();
-  }
-  if (typeof rawDate === "string" || typeof rawDate === "number") {
-    const timestamp = new Date(rawDate).getTime();
-    return Number.isNaN(timestamp) ? undefined : timestamp;
-  }
-  return undefined;
 }

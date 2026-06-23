@@ -1485,6 +1485,14 @@ label {
   line-height: 1.45;
 }
 
+.help-credit {
+  margin: 4px 0 0;
+  border-top: 1px solid #edf2f7;
+  color: #526173;
+  padding-top: 12px;
+  font-size: 13px;
+}
+
 .deck-modal {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
