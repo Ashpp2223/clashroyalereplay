@@ -1,0 +1,62 @@
+:root { font-family: "Microsoft YaHei UI", "Noto Sans SC", sans-serif; color: #e9edf4; background: #0a111b; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 760px; }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .43; }
+.native-app { height: 100vh; display: flex; flex-direction: column; background: #0b111b; }
+.native-header { min-height: 70px; border-bottom: 1px solid #263345; display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; background: #111c2b; }
+.native-brand { display: flex; align-items: center; gap: 12px; }
+.native-brand-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 9px; background: #cf9b3e; color: #162033; font-size: 27px; }
+.native-brand strong { display: block; font-size: 16px; letter-spacing: .02em; }
+.native-brand small { display: block; margin-top: 3px; color: #a5b4ca; font-size: 11px; }
+.native-header-actions { display: flex; gap: 8px; }
+.native-header button, .playback-controls button, .playback-controls select, .wide-button, .danger-button { border: 1px solid #364a61; border-radius: 7px; background: #203147; color: #eef3fa; padding: 8px 12px; }
+.native-header .primary { background: #c59137; border-color: #e5b85f; color: #132034; font-weight: 700; }
+.native-workspace { display: grid; grid-template-columns: minmax(190px, 260px) minmax(420px, 1fr) minmax(190px, 250px); min-height: 0; flex: 1; }
+.native-sidebar, .native-inspector { min-height: 0; overflow: auto; padding: 18px 12px; background: #121c2b; }
+.native-sidebar { border-right: 1px solid #28384b; }
+.native-inspector { border-left: 1px solid #28384b; }
+.panel-heading { display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; color: #c8d3e0; letter-spacing: .05em; padding: 0 7px 12px; border-bottom: 1px solid #2a3a4d; }
+.panel-heading span:last-child { color: #8fa4ba; font-weight: 400; }
+.native-project-title { color: #f2c679; font-size: 13px; margin: 17px 8px 12px; overflow: hidden; text-overflow: ellipsis; }
+.native-tree { min-height: 120px; overflow-x: auto; }
+.tree-node { width: 100%; border: 0; border-radius: 6px; background: transparent; color: #dbe5f1; text-align: left; padding: 8px 6px; display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
+.tree-node:hover { background: #203147; }
+.tree-node.active { background: #293e55; box-shadow: inset 3px 0 #e2ab4e; }
+.tree-node-line { font-size: 12px; font-weight: 700; }
+.tree-node small { color: #a4b4c5; font-size: 10px; }
+.wide-button { display: block; width: calc(100% - 12px); margin: 16px 6px 0; background: #3f573f; border-color: #6f956f; }
+.draft-note { margin: 12px 8px; color: #efbf6a; font-size: 11px; line-height: 1.5; }
+.native-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; background: radial-gradient(circle at 50% 20%, #1b3048, #0c1521 68%); }
+.battle-toolbar { min-height: 58px; display: flex; align-items: center; gap: 18px; padding: 10px 21px; border-bottom: 1px solid #2a3b50; }
+.battle-title { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.battle-title strong { font-size: 13px; }
+.battle-title span { color: #9bafc4; font-size: 11px; }
+.battle-clock { font: 700 18px Consolas, monospace; color: #f0c46f; }
+.battle-elixir { display: flex; gap: 8px; font-size: 12px; color: #ccb8de; white-space: nowrap; }
+.battle-elixir span { color: #60758d; }
+.battle-stage { flex: 1; min-height: 0; overflow: auto; display: grid; place-items: center; padding: 8px; }
+.native-surface { width: min(100%, 460px, 29vh); position: relative; border: 2px solid #41556a; border-radius: 8px; overflow: hidden; box-shadow: 0 16px 50px #0008; background: #101b27; }
+.native-surface-label { height: 18px; padding: 3px 9px; background: #17263a; color: #d4e0eb; font-size: 10px; letter-spacing: .04em; }
+.native-crop { width: 100%; overflow: hidden; line-height: 0; }
+.native-crop canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
+.native-crop-selected { outline: 3px solid #eccd63; outline-offset: -3px; }
+.native-surface-message, .native-surface-error { position: absolute; left: 15px; right: 15px; top: 50%; transform: translateY(-50%); text-align: center; background: #111d2ce8; padding: 18px; border-radius: 8px; font-size: 12px; }
+.native-surface-error { top: auto; bottom: 14px; transform: none; color: #f2b4ad; }
+.playback-controls { display: flex; justify-content: center; align-items: center; gap: 7px; flex-wrap: wrap; padding: 12px; border-top: 1px solid #29394b; }
+.playback-controls .play-button { min-width: 90px; background: #c59137; border-color: #e5b85f; color: #132034; font-weight: 700; }
+.playback-controls select { padding-right: 20px; }
+.timeline-scrubber { width: calc(100% - 42px); margin: 3px 21px 8px; accent-color: #e2ad50; }
+.native-notice { min-height: 34px; padding: 6px 20px 12px; color: #adc0d2; font-size: 11px; overflow-wrap: anywhere; }
+.native-inspector label { display: block; color: #aabbce; font-size: 11px; margin: 18px 6px; }
+.native-inspector input, .native-inspector textarea { width: 100%; margin-top: 7px; padding: 8px; background: #0e1928; border: 1px solid #384d62; border-radius: 5px; color: #f0f4fa; resize: vertical; }
+.inspector-stat { display: flex; justify-content: space-between; margin: 12px 6px; color: #aabbce; font-size: 11px; }
+.inspector-stat strong { color: #e6eef7; }
+.inspector-empty { color: #90a3b7; font-size: 12px; padding: 10px 7px; }
+.danger-button { width: calc(100% - 12px); margin: 2px 6px 20px; color: #f5b8b0; background: #38282d; border-color: #6b464b; font-size: 11px; }
+.runtime-card { margin: 18px 5px; border: 1px solid #344960; border-radius: 7px; padding: 12px; display: flex; flex-direction: column; gap: 8px; color: #9fb0c1; font-size: 11px; overflow-wrap: anywhere; }
+.runtime-card strong { color: #dbe6f0; }
+.runtime-card p { color: #f0b3ab; line-height: 1.4; margin: 0; }
+.runtime-card small { color: #657c94; }
+@media (max-width: 840px) { .native-workspace { grid-template-columns: 190px minmax(420px, 1fr); } .native-inspector { display: none; } }

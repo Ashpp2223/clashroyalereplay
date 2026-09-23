@@ -8,3 +8,6 @@ dist
 src-tauri/target
 src-tauri/gen
 *.cr-replay.json
+*.cr-native-replay.json
+.local-runtime/
+**/__pycache__/
