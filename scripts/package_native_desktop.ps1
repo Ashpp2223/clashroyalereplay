@@ -25,6 +25,6 @@ try {
     Copy-Item -LiteralPath $built.FullName -Destination $target
     Copy-Item -LiteralPath docs/native-desktop-user-guide.md -Destination (Join-Path $output '使用说明.md')
     $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$digest  $($built.Name)" | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Encoding ASCII
+    [IO.File]::WriteAllText((Join-Path $output 'SHA256SUMS.txt'), "$digest  $($built.Name)`n", [Text.UTF8Encoding]::new($false))
     Write-Output "installer=$target"
 } finally { Pop-Location }
