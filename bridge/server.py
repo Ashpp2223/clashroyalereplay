@@ -15,7 +15,7 @@ from .runtime import AndroidRuntime
 
 
 ALLOWED_ORIGINS = {"http://127.0.0.1:1420", "http://localhost:1420", "tauri://localhost",
-                   "https://tauri.localhost"}
+                   "http://tauri.localhost", "https://tauri.localhost"}
 
 
 class BridgeServer(ThreadingHTTPServer):
@@ -121,7 +121,9 @@ class BridgeRequest(BaseHTTPRequestHandler):
                 result = controller.snapshot_release(body.get("handle"))
             elif path == "/v1/replay":
                 result = controller.replay(body.get("seed"), body.get("actions", []),
-                                           body.get("targetTick"), body.get("expectedDigest"))
+                                           body.get("targetTick"), body.get("expectedDigest"),
+                                           body.get("snapshotHandle"), body.get("baseTick"),
+                                           body.get("baseDigest"))
             else:
                 self._send(404, {"error": "not found"})
                 return

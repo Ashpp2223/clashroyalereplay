@@ -67,8 +67,11 @@ export class NativeBridge {
   }
 
   async replay(seed: number, actions: NativeBattleAction[], targetTick: number,
-               expectedDigest?: string): Promise<NativeObservation> {
-    return this.post("/v1/replay", { seed, actions, targetTick, expectedDigest });
+               expectedDigest?: string, snapshotHandle?: number, baseTick?: number,
+               baseDigest?: string): Promise<NativeObservation> {
+    return this.post("/v1/replay", {
+      seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest
+    });
   }
 
   private url(path: string): string {

@@ -11,3 +11,7 @@ src-tauri/gen
 *.cr-native-replay.json
 .local-runtime/
 **/__pycache__/
+# Local emulator identity files and Windows shortcuts.
+/configs/customer_config.json
+/configs/vm_config.json
+*.lnk

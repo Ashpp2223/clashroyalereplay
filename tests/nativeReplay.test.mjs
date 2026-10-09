@@ -8,6 +8,7 @@ import {
   createNativeProject,
   deleteNativeSubtree,
   nativeActionsToNode,
+  nearestNativeSnapshotNode,
   STANDARD_NATIVE_DECK,
   validateNativeProject
 } from "../src/domain/nativeReplay.ts";
@@ -61,4 +62,17 @@ test("delete subtree leaves other branches intact", () => {
   assert.deepEqual(deleted.nodes[root.rootNodeId].childIds, [two.node.id]);
   assert.equal(deleted.nodes[one.node.id], undefined);
   validateNativeProject(deleted);
+});
+
+test("time seek chooses the nearest cached ancestor, never a sibling or future node", () => {
+  const root = createNativeProject(identity, match, 90, "root");
+  const one = createNativeCheckpoint(root, advanceNativeWork(checkoutNativeNode(root, root.rootNodeId), 100), "one");
+  const two = createNativeCheckpoint(one.project, advanceNativeWork(one.branch, 130), "two");
+  const sibling = createNativeCheckpoint(two.project,
+    advanceNativeWork(checkoutNativeNode(two.project, root.rootNodeId), 110), "sibling");
+  const cached = new Set([root.rootNodeId, one.node.id, two.node.id, sibling.node.id]);
+  assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 120, cached)?.id, one.node.id);
+  assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 90, cached)?.id, root.rootNodeId);
+  assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 130, cached)?.id, two.node.id);
+  assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 120, new Set([sibling.node.id])), null);
 });

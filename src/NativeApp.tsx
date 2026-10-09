@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
-  nativePathToNode, nativeSubtreeIds, STANDARD_NATIVE_DECK, updateNativeNodeMetadata, type NativeBattleAction,
+  nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK,
+  updateNativeNodeMetadata, type NativeBattleAction,
   type NativeReplayProject, type NativeWorkingBranch
 } from "./domain/nativeReplay.ts";
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
@@ -26,6 +27,7 @@ export default function NativeApp() {
   const [observation, setObservation] = useState<NativeObservation | null>(null);
   const [selected, setSelected] = useState<{ owner: 0 | 1; slot: number } | null>(null);
   const [speed, setSpeed] = useState(1);
+  const [scrubRoute, setScrubRoute] = useState<{ nodeId: string; maxTick: number } | null>(null);
   const [filePath, setFilePath] = useState<string | null>(null);
   const [notice, setNotice] = useState("准备启动原生战斗环境");
   const [busy, setBusy] = useState(false);
@@ -35,6 +37,7 @@ export default function NativeApp() {
   const branchRef = useRef(branch);
   const observationRef = useRef(observation);
   const snapshots = useRef(new Map<string, number>());
+  const scrubRouteRef = useRef(scrubRoute);
 
   function putProject(value: NativeReplayProject | null): void {
     projectRef.current = value;
@@ -48,6 +51,10 @@ export default function NativeApp() {
     observationRef.current = value;
     setObservation(value);
   }
+  function putScrubRoute(value: { nodeId: string; maxTick: number } | null): void {
+    scrubRouteRef.current = value;
+    setScrubRoute(value);
+  }
   async function exclusive(work: () => Promise<void>): Promise<void> {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -57,8 +64,17 @@ export default function NativeApp() {
     finally { busyRef.current = false; setBusy(false); }
   }
 
-  async function rememberSnapshot(client: NativeBridge, nodeId: string): Promise<void> {
-    const receipt = await client.post<{ handle: number }>("/v1/snapshot-create");
+  async function rememberSnapshot(client: NativeBridge, nodeId: string, expectedTick: number): Promise<void> {
+    const receipt = await client.post<{ handle: number; tick: number }>("/v1/snapshot-create");
+    if (!Number.isSafeInteger(receipt.handle) || receipt.handle <= 0 || receipt.tick !== expectedTick) {
+      if (Number.isSafeInteger(receipt.handle) && receipt.handle > 0) {
+        await client.post("/v1/snapshot-release", { handle: receipt.handle }).catch(() => undefined);
+      }
+      throw new Error("节点快照与当前战斗 tick 不一致");
+    }
+    const previous = snapshots.current.get(nodeId);
+    if (previous) await client.post("/v1/snapshot-release", { handle: previous }).catch(() => undefined);
+    snapshots.current.delete(nodeId);
     snapshots.current.set(nodeId, receipt.handle);
     if (snapshots.current.size > 32) {
       const oldest = snapshots.current.entries().next().value as [string, number] | undefined;
@@ -75,6 +91,39 @@ export default function NativeApp() {
     for (const handle of handles) {
       await client.post("/v1/snapshot-release", { handle }).catch(() => undefined);
     }
+  }
+
+  async function replayTo(client: NativeBridge, source: NativeReplayProject, nodeId: string,
+                          actions: NativeBattleAction[], targetTick: number,
+                          expectedDigest?: string): Promise<NativeObservation> {
+    const path = nativePathToNode(source, nodeId);
+    const targetNode = expectedDigest && path.find((node) =>
+      node.finalTick === targetTick && node.stateDigest === expectedDigest);
+    const cacheTarget = async (): Promise<void> => {
+      if (targetNode && !snapshots.current.has(targetNode.id)) {
+        await rememberSnapshot(client, targetNode.id, targetNode.finalTick).catch(() => undefined);
+      }
+    };
+    const base = nearestNativeSnapshotNode(source, nodeId, targetTick, new Set(snapshots.current.keys()));
+    if (base) {
+      try {
+        const state = await client.replay(source.match.seed,
+          actions.filter((action) => action.tick > base.finalTick && action.tick <= targetTick),
+          targetTick, expectedDigest, snapshots.current.get(base.id), base.finalTick, base.stateDigest);
+        const used = snapshots.current.get(base.id)!;
+        snapshots.current.delete(base.id);
+        snapshots.current.set(base.id, used);
+        await cacheTarget();
+        return state;
+      } catch {
+        // A new native battle invalidates every process-scoped snapshot handle.
+      }
+    }
+    await releaseSnapshots(client);
+    const state = await client.replay(source.match.seed,
+      actions.filter((action) => action.tick <= targetTick), targetTick, expectedDigest);
+    await cacheTarget();
+    return state;
   }
 
   useEffect(() => {
@@ -103,12 +152,13 @@ export default function NativeApp() {
             if (loaded) {
               const root = loaded.nodes[loaded.rootNodeId];
               let state = await bridge.replay(loaded.match.seed, [], root.finalTick, root.stateDigest);
-              await rememberSnapshot(bridge, loaded.rootNodeId);
+              await rememberSnapshot(bridge, loaded.rootNodeId, root.finalTick);
               putObservation(state);
               putBranch(checkoutNativeNode(loaded, loaded.rootNodeId));
+              putScrubRoute(null);
               const journal = await readNativeJournal(loaded);
               if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
-                state = await bridge.replay(loaded.match.seed,
+                state = await replayTo(bridge, loaded, journal.checkedOutNodeId,
                   [...nativeActionsToNode(loaded, journal.checkedOutNodeId), ...journal.actions],
                   journal.workingTick);
                 putObservation(state);
@@ -123,10 +173,11 @@ export default function NativeApp() {
               const next = createNativeProject(latest.identity,
                 { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] },
                 state.tick, state.digest);
+              await rememberSnapshot(bridge, next.rootNodeId, state.tick);
               putProject(next);
               putBranch(checkoutNativeNode(next, next.rootNodeId));
               putObservation(state);
-              await rememberSnapshot(bridge, next.rootNodeId);
+              putScrubRoute(null);
               setFilePath(await saveNativeProject(next, null));
               setNotice("原生战斗已就绪；选择任一方手牌，再点击竞技场出牌");
             }
@@ -161,10 +212,11 @@ export default function NativeApp() {
       const next = createNativeProject(status.identity,
         { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] },
         state.tick, state.digest);
+      await rememberSnapshot(bridge, next.rootNodeId, state.tick);
       putProject(next);
       putBranch(checkoutNativeNode(next, next.rootNodeId));
       putObservation(state);
-      await rememberSnapshot(bridge, next.rootNodeId);
+      putScrubRoute(null);
       setFilePath(await saveNativeProject(next, null));
       setSelected(null);
       setNotice("已开始新战斗");
@@ -183,10 +235,10 @@ export default function NativeApp() {
         await releaseSnapshots(bridge);
         const root = opened.project.nodes[opened.project.rootNodeId];
         let state = await bridge.replay(opened.project.match.seed, [], root.finalTick, root.stateDigest);
-        await rememberSnapshot(bridge, opened.project.rootNodeId);
+        await rememberSnapshot(bridge, opened.project.rootNodeId, root.finalTick);
         const journal = await readNativeJournal(opened.project);
         if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
-          state = await bridge.replay(opened.project.match.seed,
+          state = await replayTo(bridge, opened.project, journal.checkedOutNodeId,
             [...nativeActionsToNode(opened.project, journal.checkedOutNodeId), ...journal.actions],
             journal.workingTick);
           putBranch(journal);
@@ -199,6 +251,7 @@ export default function NativeApp() {
         putBranch(checkoutNativeNode(opened.project, opened.project.rootNodeId));
       }
       putProject(opened.project);
+      putScrubRoute(null);
       setFilePath(opened.path);
       setSelected(null);
       setNotice(`已打开 ${opened.project.title}`);
@@ -221,48 +274,43 @@ export default function NativeApp() {
       putObservation(state);
       const work = advanceNativeWork(branchRef.current!, state.tick);
       const result = createNativeCheckpoint(projectRef.current!, work, state.digest);
+      await rememberSnapshot(bridge, result.node.id, state.tick);
+      const savedPath = await saveNativeProject(result.project, filePath);
       putProject(result.project);
       putBranch(result.branch);
-      const savedPath = await saveNativeProject(result.project, filePath);
+      putScrubRoute(null);
       setFilePath(savedPath);
       await clearNativeJournal(result.project.projectId);
-      await rememberSnapshot(bridge, result.node.id);
       setNotice(`已在 ${formatNativeTick(state.tick)} 创建节点；战斗保持暂停`);
     });
   }
 
   async function checkout(nodeId: string): Promise<void> {
-    if (!bridge || !projectRef.current || !branchRef.current || nodeId === branchRef.current.checkedOutNodeId) return;
+    if (!bridge || !projectRef.current || !branchRef.current ||
+        (nodeId === branchRef.current.checkedOutNodeId && !scrubRouteRef.current)) return;
     const work = branchRef.current;
-    if (work.actions.length && !window.confirm("当前有未提交的出牌。先创建节点保存这条分支，再切换吗？")) return;
+    if (!scrubRouteRef.current && work.actions.length &&
+        !window.confirm("当前有未提交的出牌。先创建节点保存这条分支，再切换吗？")) return;
     await exclusive(async () => {
       let activeProject = projectRef.current!;
-      if (work.actions.length) {
+      if (!scrubRouteRef.current && work.actions.length) {
         const state = await bridge.post<NativeObservation>("/v1/pause");
         const saved = createNativeCheckpoint(activeProject, advanceNativeWork(work, state.tick), state.digest);
+        await rememberSnapshot(bridge, saved.node.id, state.tick);
+        const savedPath = await saveNativeProject(saved.project, filePath);
         activeProject = saved.project;
         putProject(activeProject);
-        setFilePath(await saveNativeProject(activeProject, filePath));
+        putBranch(saved.branch);
+        putObservation(state);
+        setFilePath(savedPath);
         await clearNativeJournal(activeProject.projectId);
       }
       const node = activeProject.nodes[nodeId];
-      const handle = snapshots.current.get(nodeId);
-      let state: NativeObservation;
-      if (handle) {
-        try {
-          state = await bridge.post<NativeObservation>("/v1/snapshot-restore", { handle });
-          if (state.digest !== node.stateDigest) throw new Error("快照状态不一致");
-        } catch {
-          snapshots.current.delete(nodeId);
-          state = await bridge.replay(activeProject.match.seed,
-            nativeActionsToNode(activeProject, nodeId), node.finalTick, node.stateDigest);
-        }
-      } else {
-        state = await bridge.replay(activeProject.match.seed,
-          nativeActionsToNode(activeProject, nodeId), node.finalTick, node.stateDigest);
-      }
+      const state = await replayTo(bridge, activeProject, nodeId,
+        nativeActionsToNode(activeProject, nodeId), node.finalTick, node.stateDigest);
       putObservation(state);
       putBranch(checkoutNativeNode(activeProject, nodeId));
+      putScrubRoute(null);
       setSelected(null);
       setNotice(`已恢复节点「${node.title}」`);
     });
@@ -282,6 +330,7 @@ export default function NativeApp() {
         setStatus({ ...status, playing: false });
       } else {
         await bridge.post("/v1/resume");
+        putScrubRoute(null);
         setStatus({ ...status, playing: true });
       }
     });
@@ -295,6 +344,7 @@ export default function NativeApp() {
       const work = advanceNativeWork(branchRef.current!, state.tick);
       if (projectRef.current && work.actions.length) await writeNativeJournal(projectRef.current, work);
       putBranch(work);
+      putScrubRoute(null);
       if (status) setStatus({ ...status, playing: false });
     });
   }
@@ -302,23 +352,40 @@ export default function NativeApp() {
   async function seek(targetTick: number): Promise<void> {
     if (!bridge || !projectRef.current || !branchRef.current || !observationRef.current) return;
     await exclusive(async () => {
-      const source = projectRef.current!;
+      let source = projectRef.current!;
       const work = branchRef.current!;
-      const path = nativePathToNode(source, work.checkedOutNodeId);
-      const rootTick = path[0].finalTick;
-      if (!Number.isSafeInteger(targetTick) || targetTick < rootTick || targetTick > work.workingTick) {
+      let route = scrubRouteRef.current;
+      const rootTick = source.nodes[source.rootNodeId].finalTick;
+      if (!Number.isSafeInteger(targetTick) || targetTick < rootTick ||
+          targetTick > (route?.maxTick ?? work.workingTick)) {
         throw new Error("目标时间超出当前时间线");
       }
+      if (!route) {
+        if (work.actions.length && targetTick < work.workingTick) {
+          const paused = await bridge.post<NativeObservation>("/v1/pause");
+          const saved = createNativeCheckpoint(source, advanceNativeWork(work, paused.tick), paused.digest);
+          await rememberSnapshot(bridge, saved.node.id, paused.tick);
+          const savedPath = await saveNativeProject(saved.project, filePath);
+          source = saved.project;
+          putProject(source);
+          putBranch(saved.branch);
+          putObservation(paused);
+          setFilePath(savedPath);
+          await clearNativeJournal(source.projectId);
+          route = { nodeId: saved.node.id, maxTick: paused.tick };
+        } else {
+          route = { nodeId: work.checkedOutNodeId, maxTick: work.workingTick };
+        }
+        putScrubRoute(route);
+      }
+      const path = nativePathToNode(source, route.nodeId);
       const base = [...path].reverse().find((node) => node.finalTick <= targetTick)!;
-      const all = [...nativeActionsToNode(source, work.checkedOutNodeId), ...work.actions];
-      const actions = all.filter((action) => action.tick <= targetTick);
+      const actions = nativeActionsToNode(source, route.nodeId).filter((action) => action.tick <= targetTick);
       const expected = targetTick === base.finalTick ? base.stateDigest : undefined;
-      const state = await bridge.replay(source.match.seed, actions, targetTick, expected);
+      const state = await replayTo(bridge, source, route.nodeId, actions, targetTick, expected);
       putObservation(state);
       const nextWork = { checkedOutNodeId: base.id, workingTick: targetTick,
         actions: actions.filter((action) => action.tick > base.finalTick) };
-      if (nextWork.actions.length) await writeNativeJournal(source, nextWork);
-      else await clearNativeJournal(source.projectId);
       putBranch(nextWork);
       if (status) setStatus({ ...status, playing: false });
       setSelected(null);
@@ -361,6 +428,7 @@ export default function NativeApp() {
         setNotice("出牌未被引擎接受；历史未记录此动作");
       }
       putBranch(work);
+      putScrubRoute(null);
       setSelected(null);
       if (wasPlaying) {
         await bridge.post("/v1/resume");
@@ -385,7 +453,7 @@ export default function NativeApp() {
       const removed = nativeSubtreeIds(source, id);
       const next = deleteNativeSubtree(source, id);
       const parent = next.nodes[parentId];
-      const state = await bridge.replay(next.match.seed,
+      const state = await replayTo(bridge, next, parentId,
         nativeActionsToNode(next, parentId), parent.finalTick, parent.stateDigest);
       for (const removedId of removed) {
         const handle = snapshots.current.get(removedId);
@@ -397,6 +465,7 @@ export default function NativeApp() {
       putProject(next);
       putBranch(checkoutNativeNode(next, parentId));
       putObservation(state);
+      putScrubRoute(null);
       setFilePath(await saveNativeProject(next, filePath));
       await clearNativeJournal(next.projectId);
       setNotice(`已删除 ${removed.length} 个节点`);
@@ -464,7 +533,8 @@ export default function NativeApp() {
               <option value={value} key={value}>{value}×</option>)}</select>
         </div>
         <input className="timeline-scrubber" aria-label="时间跳转" type="range"
-          min={project?.nodes[project.rootNodeId].finalTick ?? 90} max={Math.max(91, branch?.workingTick ?? 91)}
+          min={project?.nodes[project.rootNodeId].finalTick ?? 90}
+          max={Math.max(91, scrubRoute?.maxTick ?? branch?.workingTick ?? 91)}
           value={observation?.tick ?? 90} disabled={!ready || busy}
           onChange={(event) => { void seek(Number(event.target.value)); }} />
         <div className="native-notice" role="status">{notice}</div>

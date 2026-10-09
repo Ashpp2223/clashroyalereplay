@@ -1,5 +1,7 @@
 # Windows 无 Android 原生战斗引擎接入计划
 
+> 2026-10-09 路线调整：用户选择使用模拟器。本计划保留为 Windows 无 Android 宿主的研究记录，当前实施以 [Android/ADB 接入计划](2026-09-23-native-engine-replay.md) 和仓库实际桥接代码为准。Windows 宿主实验不再是当前交付路径。
+
 日期：2026-10-03
 
 ## 目标与边界

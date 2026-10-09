@@ -54,7 +54,7 @@ class BattleController:
                     "probeSha256": PROBE_SHA256,
                     "apkSha256": self.runtime.apk_sha256 if self.runtime else MANIFEST["apk_sha256"],
                     "libgSha256": MANIFEST["libg_sha256"],
-                    "runtimeFingerprintSha256": MANIFEST["runtime_fingerprint_sha256"],
+                    "runtimeFingerprintSha256": self.runtime.runtime_fingerprint_sha256 if self.runtime else MANIFEST["runtime_fingerprint_sha256"],
                     "protocolVersion": "native-bridge.v1",
                     "cropProfileId": "stock-v15-1080x1920",
                 },
@@ -72,6 +72,9 @@ class BattleController:
             }
 
     def start(self) -> dict:
+        with self.lock:
+            if self.engine is not None:
+                return self.status()
         if self.runtime is None:
             raise RuntimeError("无 Android 运行时")
         try:
@@ -82,6 +85,7 @@ class BattleController:
                 self.last_error = None
                 return self.status()
         except Exception as error:
+            self.runtime.close()
             with self.lock:
                 self.last_error = str(error)
                 self.runtime.stage = "启动失败"
@@ -187,6 +191,12 @@ class BattleController:
             result = engine.request(f"restore {handle}")
             if not result.get("ok"):
                 raise RuntimeError(result.get("error", "恢复快照失败"))
+            # The probe's pending replay schedule lives outside the native snapshot.
+            # A different branch must not execute commands left by the previous one.
+            cleared = engine.request("replay-schedule-clear")
+            if not cleared.get("ok"):
+                engine.state = None
+                raise RuntimeError(cleared.get("error", "恢复后清理旧分支动作失败，请重新开局"))
             engine.state = engine._capture()
             return observation(engine.state)
 
@@ -199,12 +209,21 @@ class BattleController:
                 raise RuntimeError(result.get("error", "释放快照失败"))
             return result
 
-    def replay(self, seed: int, actions: list[dict], target_tick: int, expected_digest: str | None = None) -> dict:
-        """Cold restore from the event path. Never retries a partially sent write."""
+    def replay(self, seed: int, actions: list[dict], target_tick: int, expected_digest: str | None = None,
+               snapshot_handle: int | None = None, base_tick: int | None = None,
+               base_digest: str | None = None) -> dict:
+        """Replay an event suffix from a live snapshot, or the full path from the seed."""
         with self.lock:
-            state = self.reset(seed)
+            if snapshot_handle is None:
+                state = self.reset(seed)
+            else:
+                if self.seed != seed or not isinstance(base_tick, int) or not base_digest:
+                    raise ValueError("快照基点无效")
+                state = self.snapshot_restore(snapshot_handle)
+                if state["tick"] != base_tick or state["digest"] != base_digest:
+                    raise RuntimeError("快照基点状态不一致")
             if not isinstance(target_tick, int) or target_tick < state["tick"]:
-                raise ValueError("目标 tick 早于开局")
+                raise ValueError("目标 tick 早于重放基点")
             ordered = sorted(actions, key=lambda action: (action["tick"], action["sequence"]))
             if ordered != actions:
                 raise ValueError("动作日志顺序无效")
@@ -233,9 +252,9 @@ class BattleController:
                     [new_play(a["owner"], a["slot"], a["nativeX"], a["nativeY"]) for a in group], ticks=1)
                 if transition.advanced != 1 or not all(transition.executed):
                     raise RuntimeError(f"重放动作被拒绝：tick {tick}")
-                actual = [(event.sequence, event.owner, event.card) for event in transition.state.plays
+                actual = [(event.owner, event.card) for event in transition.state.plays
                           if event.tick == tick]
-                expected = [(a["sequence"], a["owner"], a["nativeCardId"]) for a in group]
+                expected = [(a["owner"], a["nativeCardId"]) for a in group]
                 if actual != expected:
                     raise RuntimeError(f"重放事件分歧：tick {tick}")
             remaining = target_tick - self._engine().state.tick
@@ -253,8 +272,11 @@ class BattleController:
 
     def close(self) -> None:
         with self.lock:
-            if self.engine:
-                self.engine.close()
+            try:
+                if self.engine:
+                    self.engine.close()
+            finally:
                 self.engine = None
-            if self.runtime:
-                self.runtime.close()
+                self.playing = False
+                if self.runtime:
+                    self.runtime.close()

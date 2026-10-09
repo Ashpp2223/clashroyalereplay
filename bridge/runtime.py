@@ -1,4 +1,4 @@
-"""Discover and attest the one supported Android native battle runtime."""
+"""Manage the development Android environment and attest the pinned battle engine."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import platform
+import re
+import socket
 import subprocess
 import sys
 import time
@@ -17,9 +18,10 @@ from .video import NativeFrameStream
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "clash-royale-battle-engine"
 MANIFEST = json.loads((VENDOR / "vendor" / "firstlight" / "supported_engine.json").read_text())
+CONTENT_LOCK = json.loads((ROOT / "bridge/content_lock.json").read_text(encoding="utf-8"))
 UPSTREAM_COMMIT = "f92ccbecd6a1c9ad1fa3abaca54a51110607b6df"
 PROBE_SHA256 = "04fa085250598e20096dde4eb4ce4eb7cebe2b8408925c0c05e691e50047c8fe"
-AVD_NAME = "CR_Null_ARM64_API30"
+AVD_NAME = "CR_Dev_API31"
 DEVICE_PORT = 26789
 
 
@@ -36,14 +38,16 @@ def android_sdk() -> Path:
                       str(Path.home() / "AppData" / "Local" / "Android" / "Sdk")):
         if candidate and (Path(candidate) / "platform-tools" / "adb.exe").exists():
             return Path(candidate)
-    raise RuntimeError("未找到 Android SDK；请安装 Android Emulator 和 platform-tools")
+    raise RuntimeError("未找到 Android platform-tools（adb）")
 
 
 class AndroidRuntime:
     def __init__(self, avd_name: str = AVD_NAME):
         self.avd_name = avd_name
-        self.sdk = android_sdk()
-        self.adb = self.sdk / "platform-tools" / "adb.exe"
+        # Keep the HTTP bridge available even before Android tools are installed.
+        self.sdk = Path(os.environ.get("ANDROID_SDK_ROOT") or os.environ.get("ANDROID_HOME") or
+                        str(Path.home() / "AppData/Local/Android/Sdk"))
+        self.adb = Path(os.environ.get("CR_ADB") or str(self.sdk / "platform-tools/adb.exe"))
         self.emulator = self.sdk / "emulator" / "emulator.exe"
         self.serial: str | None = None
         self.process: subprocess.Popen | None = None
@@ -51,6 +55,16 @@ class AndroidRuntime:
         self.error: str | None = None
         self.apk_sha256 = self._prepared_apk_hash()
         self.video: NativeFrameStream | None = None
+        self.owns_session = False
+        self.runtime_fingerprint_sha256 = MANIFEST["runtime_fingerprint_sha256"]
+        config_path = ROOT / ".local-runtime/runtime.json"
+        self.config = json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.exists() else {}
+        if self.config.get("sdkRoot") and not os.environ.get("ANDROID_SDK_ROOT") and not os.environ.get("ANDROID_HOME"):
+            self.sdk = Path(self.config["sdkRoot"])
+            self.adb = Path(os.environ.get("CR_ADB") or str(self.sdk / "platform-tools/adb.exe"))
+            self.emulator = self.sdk / "emulator/emulator.exe"
+        self.avd_name = self.config.get("avdName", avd_name)
+        self.preferred_serial = os.environ.get("CR_ANDROID_SERIAL") or self.config.get("serial") or "emulator-5556"
 
     @staticmethod
     def _prepared_apk_hash() -> str:
@@ -67,45 +81,46 @@ class AndroidRuntime:
         if not self.serial:
             raise RuntimeError("未选定 Android 模拟器")
         result = subprocess.run([str(self.adb), "-s", self.serial, *map(str, args)],
-                                capture_output=True, text=True, timeout=timeout, check=False)
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, check=False,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if check and result.returncode:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "ADB 命令失败")
         return result
 
     def start(self) -> dict:
         self.stage = "检查环境"
+        if not self.adb.is_file():
+            raise RuntimeError("未找到 ADB；请安装 Android platform-tools 或设置 CR_ADB")
         local_probe = VENDOR / "prebuilt" / "libcrprobe.so"
         if sha256(local_probe) != PROBE_SHA256:
             raise RuntimeError("本地探针哈希不符")
 
         self.serial = self._find_arm64_device()
         if not self.serial:
-            if not self.emulator.exists():
-                raise RuntimeError("Android Emulator 不存在")
-            avds = subprocess.run([str(self.emulator), "-list-avds"], capture_output=True,
-                                  text=True, timeout=20, check=True).stdout.splitlines()
-            if self.avd_name not in avds:
-                raise RuntimeError(f"找不到 ARM64 AVD：{self.avd_name}")
-            if platform.machine().lower() in ("amd64", "x86_64"):
-                raise RuntimeError("官方 Android Emulator 在 x86_64 Windows 上不能运行 ARM64 AVD；请连接可运行 ARM64 应用的 Android 设备或兼容模拟器")
-            self.stage = "启动模拟器"
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            self.process = subprocess.Popen([str(self.emulator), "-avd", self.avd_name,
-                                             "-no-window", "-no-snapshot-load"],
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                            creationflags=flags)
+            self._connect_selected_device()
+            self.serial = self._find_arm64_device()
+        if not self.serial:
+            self._launch_sdk_emulator()
             self.serial = self._wait_for_avd(120)
         self.stage = "等待 Android 启动"
         self._wait_for_boot(120)
         self.stage = "校验运行时"
-        self.command("root", timeout=30)
+        root = self.command("root", timeout=30, check=False)
+        if root.returncode:
+            raise RuntimeError("Android 运行环境未开启 ADB root 权限")
         self.command("wait-for-device", timeout=30)
+        if self.command("shell", "id", "-u").stdout.strip() != "0":
+            raise RuntimeError("Android 运行环境的 ADB 尚无 root 权限")
         self._check_installed_runtime()
         self.stage = "启动原生探针"
-        env = {**os.environ, "PATH": str(self.sdk / "platform-tools") + os.pathsep + os.environ.get("PATH", "")}
-        subprocess.run([sys.executable, str(VENDOR / "bootstrap_emulator.py"), "--serial", self.serial,
-                        "--timeout", "90"], env=env, capture_output=True, text=True,
-                       timeout=120, check=True)
+        self.owns_session = True
+        result = subprocess.run([sys.executable, "-m", "bridge.bootstrap_runtime", "--serial", self.serial,
+                                 "--adb", str(self.adb), "--timeout", "90"], cwd=ROOT, capture_output=True, text=True,
+                                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                                encoding="utf-8", errors="replace", timeout=120, check=False,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "原生探针启动失败")
         self.stage = "读取能力声明"
         attest = self._attest()
         self.video = NativeFrameStream(str(self.adb), self.serial)
@@ -114,28 +129,65 @@ class AndroidRuntime:
         self.error = None
         return attest
 
+    def _launch_sdk_emulator(self) -> None:
+        if not self.preferred_serial.startswith("emulator-") or not self.emulator.is_file():
+            raise RuntimeError("未找到选定的 Android 设备或官方开发模拟器")
+        port = int(self.preferred_serial.removeprefix("emulator-"))
+        if port < 5554 or port > 5682 or port % 2:
+            raise RuntimeError("开发模拟器端口必须为 5554～5682 的偶数")
+        avd_home = Path(self.config.get("avdHome", str(ROOT / ".local-runtime/avd")))
+        if not (avd_home / (self.avd_name + ".ini")).is_file():
+            raise RuntimeError("开发虚拟设备未准备；请运行 scripts/prepare_dev_emulator.ps1")
+        self.stage = "启动 Android 开发环境"
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        log = ROOT / ".local-runtime/dev-emulator.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("ab") as output:
+            self.process = subprocess.Popen(
+                [str(self.emulator), "-avd", self.avd_name, "-port", str(port), "-no-window", "-noaudio",
+                 "-no-snapshot", "-no-metrics", "-gpu", self.config.get("gpu", "host"), "-memory", "2048", "-cores", "2"],
+                env={**os.environ, "ANDROID_AVD_HOME": str(avd_home)}, stdout=output, stderr=output, creationflags=flags)
+
+    def _connect_selected_device(self) -> None:
+        preferred = self.preferred_serial
+        endpoints = set()
+        if preferred and re.fullmatch(r"(?:127\.0\.0\.1|localhost):\d+", preferred):
+            endpoints.add(preferred)
+        for endpoint in sorted(endpoints):
+            if preferred and endpoint != preferred:
+                continue
+            host, port_text = endpoint.rsplit(":", 1)
+            try:
+                with socket.create_connection((host, int(port_text)), timeout=0.3):
+                    pass
+            except OSError:
+                continue
+            subprocess.run([str(self.adb), "connect", endpoint], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
+
     def _find_arm64_device(self) -> str | None:
         devices = subprocess.run([str(self.adb), "devices"], capture_output=True,
-                                 text=True, timeout=15, check=True).stdout
-        preferred = os.environ.get("CR_ANDROID_SERIAL")
+                                 text=True, encoding="utf-8", errors="replace", timeout=15, check=True).stdout
+        preferred = self.preferred_serial
         for line in devices.splitlines()[1:]:
             parts = line.split()
             if len(parts) < 2 or parts[1] != "device" or (preferred and parts[0] != preferred):
                 continue
-            result = subprocess.run([str(self.adb), "-s", parts[0], "shell", "getprop", "ro.product.cpu.abi"],
-                                    capture_output=True, text=True, timeout=8, check=False)
-            if result.stdout.strip() == "arm64-v8a":
+            result = subprocess.run([str(self.adb), "-s", parts[0], "shell", "getprop", "ro.product.cpu.abilist"],
+                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8, check=False)
+            if "arm64-v8a" in result.stdout.strip().split(","):
                 return parts[0]
         return None
 
     def _wait_for_avd(self, timeout: float) -> str:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._connect_selected_device()
             serial = self._find_arm64_device()
             if serial:
                 return serial
             if self.process and self.process.poll() is not None:
-                raise RuntimeError(f"模拟器退出，代码 {self.process.returncode}")
+                raise RuntimeError(f"开发模拟器启动失败（{self.process.returncode}）；详情见 .local-runtime/dev-emulator.log")
             time.sleep(1)
         raise TimeoutError("模拟器启动超时")
 
@@ -149,21 +201,24 @@ class AndroidRuntime:
         raise TimeoutError("Android 系统启动超时")
 
     def _check_installed_runtime(self) -> None:
-        abi = self.command("shell", "getprop", "ro.product.cpu.abi").stdout.strip()
-        if abi != MANIFEST["abi"]:
-            raise RuntimeError(f"ABI 不匹配：{abi}")
+        abi_list = self.command("shell", "getprop", "ro.product.cpu.abilist").stdout.strip().split(",")
+        if MANIFEST["abi"] not in abi_list:
+            raise RuntimeError(f"运行时不支持 {MANIFEST['abi']}：{abi_list}")
         package = MANIFEST["package"]
         path_result = self.command("shell", "pm", "path", package, check=False)
         paths = [line.removeprefix("package:") for line in path_result.stdout.splitlines()]
         base_apk = next((path for path in paths if path.endswith("/base.apk")), None)
         if not base_apk:
-            self._install_local_prepared()
-            path_result = self.command("shell", "pm", "path", package)
-            paths = [line.removeprefix("package:") for line in path_result.stdout.splitlines()]
-            base_apk = next((path for path in paths if path.endswith("/base.apk")), None)
-            if not base_apk:
-                raise RuntimeError("准备好的游戏 APK 安装后仍不可用")
+            raise RuntimeError("请先安装未修改的原版游戏，并完成游戏内资源更新")
         directory = base_apk.rsplit("/", 1)[0]
+        if self.command("shell", "sha256sum", directory + "/lib/arm64/libg.so").stdout.split()[0] != MANIFEST["libg_sha256"]:
+            raise RuntimeError("已安装的 libg.so 与固定引擎版本不符")
+        self.stage = "校验游戏资源"
+        self._check_updated_content()
+        if self.command("shell", "sha256sum", base_apk).stdout.split()[0] != self.apk_sha256:
+            self._install_local_prepared()
+            base_apk = self.command("shell", "pm", "path", package).stdout.strip().removeprefix("package:")
+            directory = base_apk.rsplit("/", 1)[0]
         checks = {
             "APK": (base_apk, self.apk_sha256),
             "libg": (directory + "/lib/arm64/libg.so", MANIFEST["libg_sha256"]),
@@ -186,7 +241,38 @@ class AndroidRuntime:
         if not path.is_file() or sha256(path) != self.apk_sha256:
             raise RuntimeError("本地准备的 APK 缺失或哈希不符")
         self.stage = "安装原生战斗运行时"
-        self.command("install", str(path), timeout=180)
+        from .install_runtime import Device, install
+        receipt = ROOT / ".local-runtime" / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", self.serial) + ".json")
+        install(Device(str(self.adb), self.serial), path, receipt)
+
+    def _check_updated_content(self) -> None:
+        from .install_runtime import Device, apk_path, base_asset_hashes, resource_hashes, validate_resources
+        device = Device(str(self.adb), self.serial)
+        hashes = resource_hashes(device)
+        try:
+            validate_resources(hashes, base_asset_hashes(device, hashes, apk_path(device)))
+        except ValueError as error:
+            if hashes.get("fingerprint.json") in CONTENT_LOCK["fingerprints"]:
+                raise RuntimeError(str(error)) from error
+        else:
+            self.runtime_fingerprint_sha256 = hashes["fingerprint.json"]
+            return
+        fingerprint = f"/data/data/{MANIFEST['package']}/update/fingerprint.json"
+        result = self.command("shell", "sha256sum", fingerprint, check=False)
+        actual = result.stdout.split()[0].lower() if result.stdout.split() else ""
+        if actual not in CONTENT_LOCK["fingerprints"]:
+            content = self.command("shell", "cat", fingerprint, check=False)
+            try:
+                version = str(json.loads(content.stdout).get("version", "未知"))
+            except (ValueError, TypeError):
+                version = "未下载"
+            if version == MANIFEST["runtime_content_version"]:
+                raise RuntimeError("游戏资源版本号相同，但内容指纹不符；请使用匹配的更新资源")
+            raise RuntimeError(
+                f"当前游戏资源为 {version}，复盘引擎需要 {MANIFEST['runtime_content_version']}。"
+                "请先打开未修改的原版游戏，让它完成资源更新，再启动复盘器"
+            )
+        raise RuntimeError("游戏资源文件未完整校验")
 
     def _attest(self) -> dict:
         from .engine_adapter import new_engine
@@ -201,7 +287,8 @@ class AndroidRuntime:
             "abi": MANIFEST["abi"],
             "probe_sha256": PROBE_SHA256,
             "libg_sha256": MANIFEST["libg_sha256"],
-            "content_fingerprint_sha256": MANIFEST["runtime_fingerprint_sha256"],
+            "content_fingerprint_sha256": self.runtime_fingerprint_sha256,
+            "content_assets_sha256": CONTENT_LOCK["requiredFiles"]["assets.scdb"],
             "content_version": MANIFEST["runtime_content_version"],
         }
         for field, value in expected.items():
@@ -231,7 +318,19 @@ class AndroidRuntime:
         if self.video:
             self.video.close()
             self.video = None
+        if self.owns_session and self.serial:
+            from .bootstrap_runtime import shutdown
+            try:
+                shutdown(str(self.adb), self.serial)
+            except (OSError, subprocess.SubprocessError):
+                pass  # An exited Android process no longer owns live probe state.
+            self.owns_session = False
         if self.process and self.process.poll() is None:
-            self.process.terminate()
-            self.process.wait(timeout=10)
+            if self.serial:
+                self.command("emu", "kill", timeout=10, check=False)
+            try:
+                self.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.process.terminate()
+                self.process.wait(timeout=5)
         self.process = None

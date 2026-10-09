@@ -196,6 +196,13 @@ export function nativeActionsToNode(project: NativeReplayProject, nodeId: string
   return nativePathToNode(project, nodeId).flatMap((node) => node.actionsFromParent);
 }
 
+export function nearestNativeSnapshotNode(
+  project: NativeReplayProject, nodeId: string, targetTick: number, availableIds: ReadonlySet<string>
+): NativeTimelineNode | null {
+  return [...nativePathToNode(project, nodeId)].reverse().find((node) =>
+    node.finalTick <= targetTick && availableIds.has(node.id)) ?? null;
+}
+
 export function updateNativeNodeMetadata(
   project: NativeReplayProject,
   nodeId: string,

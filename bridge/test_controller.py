@@ -17,8 +17,14 @@ class FakeEngine:
         self.state = None
         self.reject = False
         self.snapshots = {}
+        self.next_sequence = 0
+        self.next_handle = 1
+        self.reset_count = 0
+        self.pending_actions = []
 
     def reset(self, seed=1):
+        self.reset_count += 1
+        self.snapshots.clear()
         self.state = self._state(90, ())
         return self.state
 
@@ -30,9 +36,10 @@ class FakeEngine:
     def step(self, actions=(), ticks=1):
         before = self.state.tick
         accepted = bool(actions) and not self.reject
-        plays = tuple(SimpleNamespace(sequence=index, tick=before + 1, owner=action.owner,
+        plays = tuple(SimpleNamespace(sequence=self.next_sequence + index, tick=before + 1, owner=action.owner,
                                       card=26000000, cost=30000)
                       for index, action in enumerate(actions)) if accepted else ()
+        self.next_sequence += len(plays)
         self.state = self._state(before + ticks, plays)
         return SimpleNamespace(state=self.state, advanced=ticks,
                                executed=tuple(accepted for _ in actions))
@@ -48,8 +55,12 @@ class FakeEngine:
         return {"ok": True}
 
     def request(self, command):
+        if command == "replay-schedule-clear":
+            self.pending_actions.clear()
+            return {"ok": True}
         if command == "snapshot-create":
-            handle = len(self.snapshots) + 1
+            handle = self.next_handle
+            self.next_handle += 1
             self.snapshots[handle] = self.state
             return {"ok": True, "handle": handle, "tick": self.state.tick}
         if command.startswith("restore "):
@@ -98,6 +109,45 @@ class ControllerTest(unittest.TestCase):
         self.controller.step(4)
         restored = self.controller.snapshot_restore(snapshot["handle"])
         self.assertEqual(restored["tick"], 90)
+
+    def test_restore_discards_future_actions_from_the_previous_branch(self):
+        snapshot = self.controller.snapshot_create()
+        self.engine.pending_actions.append({"tick": 110, "owner": 1})
+        self.controller.snapshot_restore(snapshot["handle"])
+        self.assertEqual(self.engine.pending_actions, [])
+
+    def test_runtime_cleanup_runs_even_if_engine_socket_close_fails(self):
+        closed = []
+        self.controller.runtime = SimpleNamespace(close=lambda: closed.append(True))
+        def broken_close():
+            raise ConnectionError("socket already lost")
+        self.engine.close = broken_close
+        with self.assertRaises(ConnectionError):
+            self.controller.close()
+        self.assertEqual(closed, [True])
+        self.assertIsNone(self.controller.engine)
+
+    def test_replay_continues_from_snapshot_without_reset(self):
+        base = self.controller.step(5)
+        snapshot = self.controller.snapshot_create()
+        resets = self.engine.reset_count
+        action = {"tick": 97, "sequence": 42, "owner": 1, "kind": "play-card",
+                  "nativeCardId": 26000000, "slot": 0, "nativeX": 3500, "nativeY": 13000}
+        result = self.controller.replay(41, [action], 100, snapshot_handle=snapshot["handle"],
+                                        base_tick=95, base_digest=base["digest"])
+        self.assertEqual(result["tick"], 100)
+        self.assertEqual(self.engine.reset_count, resets)
+        with self.assertRaisesRegex(RuntimeError, "快照基点状态不一致"):
+            self.controller.replay(41, [action], 100, snapshot_handle=snapshot["handle"],
+                                   base_tick=95, base_digest="wrong")
+
+    def test_replay_does_not_confuse_event_cursor_with_saved_action_order(self):
+        self.engine.next_sequence = 17
+        action = {"tick": 91, "sequence": 99, "owner": 1, "kind": "play-card",
+                  "nativeCardId": 26000000, "slot": 0, "nativeX": 3500, "nativeY": 13000}
+        result = self.controller.replay(41, [action], 91)
+        self.assertEqual(result["tick"], 91)
+        self.assertEqual(self.engine.state.plays[0].sequence, 17)
 
 
 if __name__ == "__main__":
