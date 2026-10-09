@@ -105,6 +105,46 @@ def validate_resources(hashes: dict[str, str], base_assets: dict[str, str] | Non
             raise ValueError(f"游戏资源缺失或不匹配：{name}")
 
 
+def recover_pending_downloads(device: Device, hashes: dict[str, str]) -> dict[str, str]:
+    """Publish completed .update files only after checking the trusted manifest."""
+    pending = [name for name in hashes if name.endswith(".update")]
+    if not pending:
+        return hashes
+    if hashes.get("fingerprint.json") not in CONTENT_LOCK["fingerprints"]:
+        raise ValueError("更新指纹未核验，不能恢复下载临时文件")
+    device.shell(f"am force-stop {PACKAGE}")
+    fingerprint_path = DATA + "/update/fingerprint.json"
+    if file_hash(device, fingerprint_path) != hashes["fingerprint.json"]:
+        raise ValueError("更新指纹已变化，停止恢复")
+    manifest = json.loads(device.shell("cat " + shlex.quote(fingerprint_path)))
+    expected = {row["file"]: row["sha"] for row in manifest["files"]}
+    plan = []
+    for name in pending:
+        target = name.removesuffix(".update")
+        if not target or target.startswith("/") or ".." in target.split("/") or "\\" in target:
+            raise ValueError("下载临时文件路径无效")
+        source = DATA + "/update/" + name
+        result = device.shell("sha1sum " + shlex.quote(source)).split()
+        if not result or not re.fullmatch(r"[0-9a-f]{40}", result[0]) or result[0] != expected.get(target):
+            raise ValueError(f"下载临时文件未完成或不匹配：{name}")
+        if target in hashes and hashes[target] != hashes[name]:
+            raise ValueError(f"正式资源与下载临时文件冲突：{target}")
+        if target not in hashes:
+            plan.append((name, target))
+    updated = dict(hashes)
+    for name, target in plan:
+        source, destination = (DATA + "/update/" + item for item in (name, target))
+        device.shell(f"cp -p -n {shlex.quote(source)} {shlex.quote(destination)} && restorecon -F {shlex.quote(destination)}")
+        if file_hash(device, destination) != hashes[name]:
+            raise ValueError(f"恢复后的资源校验失败：{target}")
+        updated[target] = hashes[name]
+    if plan:
+        save_receipt(ROOT / ".local-runtime/pending-resource-recovery.json",
+                     {"serial": device.serial, "fingerprintSha256": hashes["fingerprint.json"],
+                      "restored": [{"source": name, "file": target, "sha256": hashes[name]} for name, target in plan]})
+    return updated
+
+
 def validate_apk(apk: Path, *, update: bool = False) -> dict:
     receipt = json.loads(apk.with_suffix(".build.json").read_text(encoding="utf-8"))
     expected = {"schema": "cr-update-build.v1" if update else "cr-probe-build.v1", "package": PACKAGE,

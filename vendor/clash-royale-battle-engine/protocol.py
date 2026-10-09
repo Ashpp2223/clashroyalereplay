@@ -82,6 +82,10 @@ class State:
 
     @classmethod
     def decode(cls, data):
+        if not data.get('ok'):
+            raise RuntimeError(data.get('error', 'native capture failed'))
+        if data.get('schema') != 'cr-minimal.v3':
+            raise RuntimeError(f"unsupported native capture schema: {data.get('schema')}; rebuild the replay probe")
         players = tuple(Player(p['owner'], p['elixir'], tuple(HandCard(*c) for c in p['hand']),
                                tuple(p['cycle'])) for p in data['players'])
         entities = tuple(Entity.decode(e) for e in data['entities'])

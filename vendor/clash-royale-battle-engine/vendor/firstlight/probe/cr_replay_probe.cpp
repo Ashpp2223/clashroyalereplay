@@ -6438,7 +6438,8 @@ void handle_control_command(int socket_fd, const char *command) {
   char response[kControlResponseBytes] = {};
 #ifdef CR_MINIMAL_CAPTURE
   if (handle_minimal_capture(socket_fd, command)) return;
-  // Unsupported rich/snapshot commands must not imply full telemetry support.
+  // Replay uses snapshots and attestation with compact capture. Rich telemetry
+  // remains unavailable because the minimal profile does not install its hooks.
   // CR_RESIDENT_COMMANDS additionally exposes the resident multi-match control
   // plane (env-prefixed commands, multi-status, multi-stop) so several battles
   // can be driven in one host round trip. Every baseline minimal command keeps
@@ -6454,7 +6455,12 @@ void handle_control_command(int socket_fd, const char *command) {
                                      std::strncmp(command, "advance-native ", 15) == 0 ||
                                      std::strncmp(command, "speed ", 6) == 0 ||
                                      std::strcmp(command, "pause") == 0 || std::strcmp(command, "resume") == 0;
-  if (!resident_allowed && !native_render_allowed && std::strcmp(command, "status") != 0 &&
+  const bool replay_state_allowed = std::strcmp(command, "attest") == 0 ||
+                                    std::strcmp(command, "snapshot-create") == 0 ||
+                                    std::strncmp(command, "restore ", 8) == 0 ||
+                                    std::strncmp(command, "release-snapshot ", 17) == 0 ||
+                                    std::strcmp(command, "replay-schedule-clear") == 0;
+  if (!resident_allowed && !native_render_allowed && !replay_state_allowed && std::strcmp(command, "status") != 0 &&
       std::strcmp(command, "observe") != 0 &&
       std::strncmp(command, "configure ", 10) != 0 && std::strncmp(command, "step ", 5) != 0 &&
       std::strncmp(command, "inject ", 7) != 0) {

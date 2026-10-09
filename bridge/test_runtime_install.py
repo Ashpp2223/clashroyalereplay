@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +12,54 @@ from scripts.prepare_probe_apk import patch_bootstrap
 OLD, NEW = "1" * 64, "2" * 64
 BASE = "/data/app/test/nullsroyale.rel.free/base.apk"
 RESOURCES = {**installer.CONTENT_LOCK["requiredFiles"], "fingerprint.json": installer.MANIFEST["runtime_fingerprint_sha256"]}
+
+
+class PendingDownloadsTest(unittest.TestCase):
+    def setUp(self):
+        self.contents = {"sc/a.sc.update": b"complete asset", "sc/b.sc.update": b"another asset"}
+        self.manifest = json.dumps({"files": [{"file": name.removesuffix(".update"),
+                                              "sha": hashlib.sha1(data).hexdigest()}
+                                             for name, data in self.contents.items()]})
+        self.fingerprint = hashlib.sha256(self.manifest.encode()).hexdigest()
+        self.hashes = {name: hashlib.sha256(data).hexdigest() for name, data in self.contents.items()}
+        self.hashes["fingerprint.json"] = self.fingerprint
+        self.operations = []
+        self.device = type("Device", (), {"serial": "emulator-5556", "shell": self.shell})()
+        lock = patch.dict(installer.CONTENT_LOCK, {"fingerprints": [self.fingerprint]})
+        lock.start()
+        self.addCleanup(lock.stop)
+
+    def shell(self, script):
+        self.operations.append(script)
+        if script.startswith("cat "):
+            return self.manifest
+        if script.startswith("sha1sum "):
+            name = script.split("/update/", 1)[1]
+            return hashlib.sha1(self.contents[name]).hexdigest() + " " + name
+        return ""
+
+    def test_complete_assets_are_published_with_manifest_checks(self):
+        with patch.object(installer, "file_hash", side_effect=lambda _, path: self.hashes[path.split("/update/", 1)[1]]
+                          if path.endswith("fingerprint.json") else self.hashes[path.split("/update/", 1)[1] + ".update"]), \
+                patch.object(installer, "save_receipt") as receipt:
+            result = installer.recover_pending_downloads(self.device, self.hashes)
+        self.assertEqual(result["sc/a.sc"], self.hashes["sc/a.sc.update"])
+        self.assertEqual(len([op for op in self.operations if op.startswith("cp ")]), 2)
+        receipt.assert_called_once()
+
+    def test_one_incomplete_download_prevents_all_copies(self):
+        self.contents["sc/b.sc.update"] = b"truncated"
+        with patch.object(installer, "file_hash", return_value=self.fingerprint):
+            with self.assertRaisesRegex(ValueError, "未完成"):
+                installer.recover_pending_downloads(self.device, self.hashes)
+        self.assertFalse(any(op.startswith("cp ") for op in self.operations))
+
+    def test_conflicting_final_asset_is_preserved(self):
+        self.hashes["sc/a.sc"] = "f" * 64
+        with patch.object(installer, "file_hash", return_value=self.fingerprint):
+            with self.assertRaisesRegex(ValueError, "冲突"):
+                installer.recover_pending_downloads(self.device, self.hashes)
+        self.assertFalse(any(op.startswith("cp ") for op in self.operations))
 
 
 class FakeDevice:

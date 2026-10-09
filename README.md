@@ -4,7 +4,7 @@
 
 ## 当前实现
 
-- 固定战斗接口和探针源码：`vendor/clash-royale-battle-engine`，提交 `f92ccbecd6a1c9ad1fa3abaca54a51110607b6df`。原版战斗规则由用户提供的 `libg.so` 执行。
+- 战斗接口和探针基线：`vendor/clash-royale-battle-engine`，上游提交 `f92ccbecd6a1c9ad1fa3abaca54a51110607b6df`。本地复盘探针开放精简协议的身份校验和快照命令，使用 NDK r29 从源码重建；来源记录见 `prebuilt/replay-probe-build.json`。原版战斗规则由用户提供的 `libg.so` 执行。
 - Python 桥接服务：严格检查 APK、`libg`、探针和运行时指纹；提供双方出牌、原生暂停/播放/变速/步进、快照与动作重放。
 - React v2 界面：敌方原生 HUD、竞技场、我方原生 HUD 三段裁切；双方圣水观测、节点树、草稿分支、备注和项目保存。
 - v2 文件：`.cr-native-replay.json`。旧 `.cr-replay.json` v1 文件不转换。
@@ -30,7 +30,7 @@ cargo check --manifest-path src-tauri\Cargo.toml
 
 ## 本机运行时状态
 
-当前路线是 Windows 界面 + 一套 Python 桥接 + 一个 ARM64 兼容 Android 游戏进程。运行时不需要训练框架或 Frida；画面由游戏绘制。当前接口、节点、快照及持久动作日志的代码已实现，**真实战斗闭环仍需实际引擎验收**。
+当前路线是 Windows 界面 + 一套 Python 桥接 + 一个 ARM64 兼容 Android 游戏进程。运行时不需要训练框架或 Frida；画面由游戏绘制。**标准卡组的真实引擎接口验收已通过**，覆盖双方出牌、分支差异、原生快照恢复、快照后缀重放、动作日志重放、游戏进程重启恢复、播放控制和原生画面。桌面完整交互、长时间稳定性及其他卡组/能力仍需后续验收。
 
 `scripts/prepare_native_runtime.ps1` 从未修改的原版 APK 重新解包，添加探针的明确加载入口。构建会核对 `libg`、固定探针和全部 APK assets；临时构建使用英文路径以兼容 Windows aapt2。游戏文件和生成包只保存在被忽略的 `.local-runtime/`，不会随仓库分发。
 
@@ -42,11 +42,22 @@ cargo check --manifest-path src-tauri\Cargo.toml
 
 开发环境由 `scripts/prepare_dev_emulator.ps1` 配置，使用 Google APIs x86_64 镜像提供 ARM64 应用支持。虚拟设备、日志和配置保存在 `.local-runtime/`；桥接负责无窗口启动及其创建进程的退出清理，使用 2 核、2 GiB 客体内存和本机图形后端。`.local-runtime/runtime.json` 记录 `sdkRoot`、`avdName`、`avdHome`、`serial` 和 `gpu`；`CR_ANDROID_SERIAL`、`CR_ADB` 可覆盖连接信息。
 
-当前配置是 Android 12 / API 31 开发镜像，ARM64 支持、ADB 和资源迁移均已验证。Android 11 和 12 的实测都未进入战斗：API 30 的含探针及无探针对照包均在 Mainloop 出现 SIGSEGV；API 31 的探针包 SIGSEGV，无探针对照包 SIGILL。说明接入代码之外仍有运行兼容问题，具体原因尚未定位，不能宣称引擎可用。启动时会检测游戏退出并直接报告失败；崩溃日志在 `.local-runtime/native-startup-crash.log`，真实验收结果在 `.local-runtime/native-runtime-check.json`。
+当前配置是 Android 12 / API 31 开发镜像，ARM64 支持、ADB 和资源迁移均已验证。此前 Mainloop 崩溃已定位到 4 份画面资源仍使用 `.update` 下载临时名：恢复经指纹 SHA-1 验证的正式路径后，内容加载通过。启动会检查并恢复已完整下载的临时文件，保留原文件及恢复记录；未完成、未知指纹或正式路径冲突时停止。
+
+上游预编译探针返回 `cr-minimal.v1`，与仓库客户端的 v3 解码器不一致，且拒绝原生画面配置、身份校验与快照命令。已从同一基线源码重建精简 v3 探针并仅开放所需复盘命令，继续拒绝未支持的富遥测；运行时核验实际探针哈希。SDK 专用设备配置首次全屏提示已确认，避免遮挡原生画面。
+
+2026-10-09 实测 12 项验收通过，原生画面另经人工检查。多轮节点快照恢复约 22～67 ms；进程内从开局重放到 tick 162 约 9.2～9.3 s；关闭并重新启动游戏进程后恢复该节点约 35.5～37 s（含启动和资源校验）。这些是本机标准卡组的测量，不能推算其他设备或更长对局。实际报告和截图在 `.local-runtime/native-runtime-check.*`。新探针还完成含法术的原生规则对局：tick 6101 终局，双方各 61 次出牌，法术共 39 次，最多同时观测 18 个实体；该长对局使用无画面步进模式，未验证整场画面流。验收中的画面模式与无画面模式各从新游戏进程开始，直接在已创建的画面对局中切换到无画面模式会超时。
 
 ## 运行时准备与真实验收
 
 先准备支持 ARM64、允许 ADB root 的专用开发环境。已有经过校验的数据导出时，可迁移到空开发实例；导入不覆盖另一份游戏或不同资源，也不迁移与旧 Android 版本绑定的 ART/WebView 缓存。
+
+仓库已包含本地重建探针及构建来源记录；普通启动无需安装 NDK。需要修改探针时，用 [官方 NDK r29](https://github.com/android/ndk/releases/tag/r29)重建，核对产物和来源记录，并更新 `bridge/runtime.py` 的固定探针哈希后重新准备 APK：
+
+```powershell
+python -m scripts.build_replay_probe --ndk 'C:\Users\pp\AppData\Local\Android\Sdk\ndk\29.0.14206865'
+.\scripts\prepare_native_runtime.ps1
+```
 
 ```powershell
 .\scripts\prepare_dev_emulator.ps1 -ApiLevel 31
@@ -80,6 +91,6 @@ python -m bridge.install_runtime --serial emulator-5556 --update-apk $update
 
 恢复先前安装可用 `python -m bridge.install_runtime --serial <原设备地址> --restore <安装记录.json>`。恢复前再次校验备份，设备不符或校验失败会停止。
 
-真实验收脚本通过实际 HTTP 接口检查 tick 90、双方出牌、分支状态差异、跨分支快照恢复、快照后缀重放、从种子与日志重放、原版播放/暂停/变速和画面。报告及截图保存为 `.local-runtime/native-runtime-check.*`；只有全部通过才会报告 `passed`。模拟测试或前端构建不证明原版战斗可用。
+真实验收脚本通过实际 HTTP 接口检查 tick 90、双方出牌、分支状态差异、跨分支快照恢复、快照后缀重放、从种子与日志重放、游戏进程关闭重启后重放、原版播放/暂停/变速和画面，并通过同一原生引擎的无画面接口运行含法术对局到终局，共 12 项检查。报告及截图保存为 `.local-runtime/native-runtime-check.*`；只有全部通过才会报告 `passed`。截图需另行人工检查，图像头校验不能证明画面无遮挡。模拟测试或前端构建不证明原版战斗可用。
 
 详细设计和验收项见 [设计文档](docs/superpowers/specs/2026-09-22-native-engine-replay-design.md)。

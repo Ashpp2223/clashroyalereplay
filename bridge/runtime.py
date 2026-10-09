@@ -20,7 +20,7 @@ VENDOR = ROOT / "vendor" / "clash-royale-battle-engine"
 MANIFEST = json.loads((VENDOR / "vendor" / "firstlight" / "supported_engine.json").read_text())
 CONTENT_LOCK = json.loads((ROOT / "bridge/content_lock.json").read_text(encoding="utf-8"))
 UPSTREAM_COMMIT = "f92ccbecd6a1c9ad1fa3abaca54a51110607b6df"
-PROBE_SHA256 = "04fa085250598e20096dde4eb4ce4eb7cebe2b8408925c0c05e691e50047c8fe"
+PROBE_SHA256 = "97044a901f4eaef335e09014631bd2ac7bd3d9701a7522c0c7b761413c7b2028"
 AVD_NAME = "CR_Dev_API31"
 DEVICE_PORT = 26789
 
@@ -111,6 +111,10 @@ class AndroidRuntime:
         self.command("wait-for-device", timeout=30)
         if self.command("shell", "id", "-u").stdout.strip() != "0":
             raise RuntimeError("Android 运行环境的 ADB 尚无 root 权限")
+        if self.serial.startswith("emulator-") and self.config.get("backend") == "android-sdk":
+            # This dedicated development device must show the game rather than
+            # Android's first-run fullscreen instruction overlay.
+            self.command("shell", "settings", "--user", "0", "put", "secure", "immersive_mode_confirmations", "confirmed")
         self._check_installed_runtime()
         self.stage = "启动原生探针"
         self.owns_session = True
@@ -246,9 +250,10 @@ class AndroidRuntime:
         install(Device(str(self.adb), self.serial), path, receipt)
 
     def _check_updated_content(self) -> None:
-        from .install_runtime import Device, apk_path, base_asset_hashes, resource_hashes, validate_resources
+        from .install_runtime import Device, apk_path, base_asset_hashes, recover_pending_downloads, resource_hashes, validate_resources
         device = Device(str(self.adb), self.serial)
         hashes = resource_hashes(device)
+        hashes = recover_pending_downloads(device, hashes)
         try:
             validate_resources(hashes, base_asset_hashes(device, hashes, apk_path(device)))
         except ValueError as error:
@@ -281,6 +286,8 @@ class AndroidRuntime:
             data = engine.request("attest")
         finally:
             engine.close()
+        if not data.get("ok"):
+            raise RuntimeError("探针未提供运行时证明：" + str(data.get("error", "无有效响应")))
         claim = data.get("attestation", {})
         expected = {
             "package_name": MANIFEST["package"],

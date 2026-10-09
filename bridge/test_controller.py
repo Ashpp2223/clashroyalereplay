@@ -150,5 +150,29 @@ class ControllerTest(unittest.TestCase):
         self.assertEqual(self.engine.state.plays[0].sequence, 17)
 
 
+class NativeCaptureContractTest(unittest.TestCase):
+    def setUp(self):
+        from bridge.engine_adapter import new_engine
+        new_engine()  # Load the actual vendored decoder without connecting.
+        from native_engine.protocol import State
+        self.decode = State.decode
+
+    def test_old_probe_capture_is_rejected_with_a_version_error(self):
+        with self.assertRaisesRegex(RuntimeError, "cr-minimal.v1"):
+            self.decode({"ok": True, "schema": "cr-minimal.v1"})
+
+    def test_native_error_is_preserved(self):
+        with self.assertRaisesRegex(RuntimeError, "manager-or-generation"):
+            self.decode({"ok": False, "error": "manager-or-generation"})
+
+    def test_current_tower_record_decodes(self):
+        state = self.decode({"ok": True, "schema": "cr-minimal.v3", "generation": 1, "tick": 90,
+                             "finalized": False, "result": None, "crowns": [0, 0], "players": [],
+                             "entities": [[5000000, 0, -1, 9000, 3000, 2400, 2400, None, 0, "building", 0]],
+                             "plays": [], "next": 1})
+        self.assertEqual(state.entities[0].entity_type, "building")
+        self.assertEqual(state.entities[0].hp, 2400)
+
+
 if __name__ == "__main__":
     unittest.main()

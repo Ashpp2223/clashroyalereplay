@@ -16,12 +16,53 @@ from bridge.runtime import AndroidRuntime, ROOT
 from bridge.server import BridgeServer
 
 
+def verify_spell_battle() -> dict:
+    # AndroidRuntime has already loaded the pinned native_engine package.
+    from native_engine.engine import Engine, Play
+    engine = Engine()
+    executions, spells, refused = [0, 0], [0, 0], []
+    try:
+        state = engine.reset(2)
+        if state.tick != 90:
+            raise AssertionError("法术对局未到达首次可操作边界")
+        peak_entities = len(state.entities)
+        for index in range(160):
+            if state.finalized:
+                break
+            plays, cards = [], []
+            for player in state.players:
+                affordable = [card for card in player.hand if card.cost * 10000 <= player.elixir]
+                if affordable:
+                    card = min(affordable, key=lambda card: (0 if index % 5 == 0 and card.card >= 28000000 else 1,
+                                                            card.cost))
+                    plays.append(Play(player.owner, card.slot, 4500, 14000 if player.owner == 0 else 18000))
+                    cards.append(card.card)
+            tick = state.tick
+            transition = engine.step(plays, 50)
+            state = transition.state
+            for action, card, executed in zip(plays, cards, transition.executed):
+                if executed:
+                    executions[action.owner] += 1
+                    if card >= 28000000:
+                        spells[action.owner] += 1
+                else:
+                    refused.append({"tick": tick + 1, "owner": action.owner, "card": card})
+            peak_entities = max(peak_entities, len(state.entities))
+        if not state.finalized or not all(spells) or refused:
+            raise AssertionError(f"法术终局检查失败：tick={state.tick}, spells={spells}, refused={refused}")
+        return {"seed": 2, "profile": "compact-v3-headless", "finalTick": state.tick,
+                "finalized": state.finalized, "result": state.result, "crowns": list(state.crowns),
+                "executions": executions, "spellExecutions": spells, "peakEntities": peak_entities}
+    finally:
+        engine.close()
+
+
 def verify(report_path: Path) -> dict:
     runtime = AndroidRuntime()
     controller = BattleController(runtime)
     server = None
     thread = None
-    report = {"status": "running", "checks": [], "timingsMs": {}}
+    report = {"status": "running", "phase": "native-startup", "checks": [], "timingsMs": {}}
     started = perf_counter()
     try:
         controller.start()
@@ -59,10 +100,12 @@ def verify(report_path: Path) -> dict:
                 raise AssertionError(f"玩家 {owner} 的出牌被原版引擎拒绝")
             return result
 
+        report["phase"] = "native-battle-reset"
         state = request("/v1/reset", {"seed": 1})
         if state["tick"] != 90:
             raise AssertionError("原版战斗未到达首次可操作边界")
         root = request("/v1/step", {"ticks": 10})
+        report["phase"] = "native-snapshots-and-actions"
         root_snapshot = request("/v1/snapshot-create", {})
         first = play(root, 0)
         second = play(first["observation"], 1)
@@ -70,8 +113,10 @@ def verify(report_path: Path) -> dict:
         branch_a = request("/v1/step", {"ticks": 60})
         branch_snapshot = request("/v1/snapshot-create", {})
         report["checks"].extend(["first-playable-tick-90", "two-sided-card-execution"])
+        report["phase"] = "native-snapshot-replay"
         before = perf_counter()
         restored = request("/v1/snapshot-restore", {"handle": root_snapshot["handle"]})
+        report["timingsMs"]["snapshotRestore"] = round((perf_counter() - before) * 1000)
         if restored["digest"] != root["digest"]:
             raise AssertionError("恢复根节点后状态不一致")
         alternative = play(restored, 0, 13500)
@@ -91,12 +136,14 @@ def verify(report_path: Path) -> dict:
         for snapshot in (root_snapshot, branch_snapshot):
             request("/v1/snapshot-release", {"handle": snapshot["handle"]})
         before = perf_counter()
+        report["phase"] = "seed-and-action-log-replay"
         cold = request("/v1/replay", {"seed": 1, "actions": actions, "targetTick": branch_a["tick"],
                                      "expectedDigest": branch_a["digest"]})
         if cold["digest"] != branch_a["digest"]:
             raise AssertionError("从种子和动作日志恢复不一致")
         report["timingsMs"]["coldReplay"] = round((perf_counter() - before) * 1000)
         report["checks"].append("seed-and-action-log-replay")
+        report["phase"] = "native-playback"
         request("/v1/speed", {"multiplier": 2})
         request("/v1/resume", {})
         sleep(0.4)
@@ -104,6 +151,20 @@ def verify(report_path: Path) -> dict:
         if paused["tick"] <= cold["tick"]:
             raise AssertionError("原版播放未推进战斗")
         report["checks"].append("native-play-pause-speed")
+        report["phase"] = "process-restart-action-log-replay"
+        before = perf_counter()
+        prior_pid = runtime.command("shell", "pidof", "nullsroyale.rel.free").stdout.strip()
+        controller.close()
+        controller.start()
+        current_pid = runtime.command("shell", "pidof", "nullsroyale.rel.free").stdout.strip()
+        reopened = request("/v1/replay", {"seed": 1, "actions": actions, "targetTick": branch_a["tick"],
+                                         "expectedDigest": branch_a["digest"]})
+        if reopened["digest"] != branch_a["digest"]:
+            raise AssertionError("重新启动游戏进程后，动作日志恢复不一致")
+        report["gameProcessIds"] = [prior_pid, current_pid]
+        report["timingsMs"]["processRestartReplay"] = round((perf_counter() - before) * 1000)
+        report["checks"].append("game-process-restart-action-log-replay")
+        report["phase"] = "native-frame"
         req = Request(base + "/v1/frame", headers={"Authorization": "Bearer " + token})
         with urlopen(req, timeout=20) as response:
             frame = response.read()
@@ -115,7 +176,16 @@ def verify(report_path: Path) -> dict:
         image_path.write_bytes(frame)
         report["framePath"] = str(image_path)
         report["checks"].append("native-frame-over-http")
-        report.update(status="passed", finalTick=paused["tick"], replayDigest=cold["digest"])
+        report["phase"] = "headless-native-spell-terminal-battle"
+        before = perf_counter()
+        # A lane owns one mode. Retire the rendered scene before starting the
+        # independent headless fixture; an in-process mode switch can stall.
+        controller.close()
+        controller.start()
+        report["spellBattle"] = verify_spell_battle()
+        report["timingsMs"]["spellBattle"] = round((perf_counter() - before) * 1000)
+        report["checks"].extend(["two-sided-native-spells", "headless-native-terminal-result"])
+        report.update(status="passed", phase="complete", finalTick=reopened["tick"], replayDigest=reopened["digest"])
     except Exception as error:
         report.update(status="failed", stage=runtime.stage, error=str(error))
     finally:
