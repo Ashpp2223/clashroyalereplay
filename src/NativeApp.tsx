@@ -199,6 +199,7 @@ export default function NativeApp() {
                 throw new Error("项目与当前引擎版本不匹配");
               }
               const root = loaded.nodes[recoveryNode.current ?? loaded.rootNodeId] ?? loaded.nodes[loaded.rootNodeId];
+              setNotice(`正在恢复已保存节点「${root.title}」，请稍候…`);
               let state = await bridge.replay(loaded.match.seed, nativeActionsToNode(loaded, root.id), root.finalTick, root.stateDigest);
               await rememberSnapshot(bridge, root.id, root.finalTick);
               putObservation(state);
@@ -530,6 +531,7 @@ export default function NativeApp() {
       putBranch(nextWork);
       if (status) setStatus({ ...status, playing: false });
       setSelected(null);
+      setNotice(`已跳转至 ${formatNativeTick(state.tick)}；战斗保持暂停`);
     });
   }
 
