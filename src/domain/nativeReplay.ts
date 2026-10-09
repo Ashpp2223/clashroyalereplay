@@ -269,7 +269,7 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
   if (!project.rootNodeId || !project.nodes || !project.match || !project.engine || !project.layout) {
     throw new Error("项目字段缺失");
   }
-  if (!Number.isSafeInteger(project.match.seed) || project.match.deck0?.length !== 8 ||
+  if (!Number.isSafeInteger(project.match.seed) || project.match.seed < 0 || project.match.seed > 2**31 - 1 || project.match.deck0?.length !== 8 ||
       project.match.deck1?.length !== 8) {
     throw new Error("随机种子或卡组无效");
   }
@@ -279,7 +279,8 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
     throw new Error("当前引擎仅支持已经验证的标准卡组");
   }
   const identity = project.engine;
-  if (!identity || Object.values(identity).some((value) => typeof value !== "string" || !value)) {
+  if (!identity || ["upstreamCommit", "probeSha256", "apkSha256", "libgSha256", "runtimeFingerprintSha256",
+    "protocolVersion", "cropProfileId"].some((key) => typeof identity[key as keyof EngineIdentity] !== "string" || !identity[key as keyof EngineIdentity])) {
     throw new Error("引擎身份字段无效");
   }
   const entries = Object.entries(project.nodes);
@@ -328,16 +329,14 @@ export function formatNativeTick(tick: number): string {
 
 function validateAction(action: NativeBattleAction): void {
   if (!action.id || !Number.isSafeInteger(action.tick) || !Number.isSafeInteger(action.sequence) ||
-      (action.owner !== 0 && action.owner !== 1)) throw new Error("动作字段无效");
+      action.tick < 0 || action.sequence < 0 || (action.owner !== 0 && action.owner !== 1)) throw new Error("动作字段无效");
   if (action.kind === "play-card") {
-    if (!Number.isSafeInteger(action.nativeCardId) || !Number.isSafeInteger(action.slot) ||
+    if (!Number.isSafeInteger(action.nativeCardId) || !STANDARD_NATIVE_DECK.some((card) => card === action.nativeCardId) || !Number.isSafeInteger(action.slot) ||
         action.slot! < 0 || action.slot! > 3 || !Number.isSafeInteger(action.nativeX) ||
         !Number.isSafeInteger(action.nativeY) || action.nativeX! < 0 || action.nativeX! > 18000 ||
         action.nativeY! < 0 || action.nativeY! > 32000) throw new Error("出牌动作字段无效");
   } else if (action.kind === "activate-ability") {
-    if (!Number.isSafeInteger(action.nativeEntityId) || !Number.isSafeInteger(action.nativeAbilityId)) {
-      throw new Error("能力动作字段无效");
-    }
+    throw new Error("当前版本未开放英雄或觉醒能力动作");
   } else {
     throw new Error("未知动作类型");
   }

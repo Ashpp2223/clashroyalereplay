@@ -62,11 +62,7 @@ export async function getDefaultSavesDirectory(): Promise<string | null> {
     return storedDirectory;
   }
 
-  const bundledDirectory = await getBundledSavesDirectory().catch(() => null);
-  if (bundledDirectory && (await ensureWritableDirectory(bundledDirectory))) {
-    return bundledDirectory;
-  }
-
+  // User projects must survive replacing or uninstalling the program files.
   const fallbackDirectory = await getFallbackSavesDirectory();
   await requireWritableDirectory(fallbackDirectory);
   return fallbackDirectory;

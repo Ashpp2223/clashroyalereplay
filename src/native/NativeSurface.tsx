@@ -10,6 +10,7 @@ interface NativeSurfaceProps {
   selected: { owner: 0 | 1; slot: number } | null;
   onHudClick: (owner: 0 | 1, pixel: { x: number; y: number }) => void;
   onArenaClick: (pixel: { x: number; y: number }) => void;
+  onUnavailable: (reason: string) => void;
 }
 
 function CroppedFrame({ image, profile, crop, label, onClick, selected }: {
@@ -28,7 +29,7 @@ function CroppedFrame({ image, profile, crop, label, onClick, selected }: {
     if (!context) return;
     context.fillStyle = "#101b27";
     context.fillRect(0, 0, crop[2], crop[3]);
-    if (!image) return;
+    if (!image || !image.width) return;
     const scale = image.width / profile.nativeWidth;
     const surfaceHeight = profile.nativeHeight * scale;
     const insetY = Math.max(0, (image.height - surfaceHeight) / 2);
@@ -46,14 +47,14 @@ function CroppedFrame({ image, profile, crop, label, onClick, selected }: {
   </div>;
 }
 
-export default function NativeSurface({ bridge, ready, profile, selected, onHudClick, onArenaClick }: NativeSurfaceProps) {
+export default function NativeSurface({ bridge, ready, profile, selected, onHudClick, onArenaClick, onUnavailable }: NativeSurfaceProps) {
   const [image, setImage] = useState<ImageBitmap | null>(null);
   const [frameError, setFrameError] = useState<string | null>(null);
+  useEffect(() => () => image?.close(), [image]);
   useEffect(() => {
-    if (!bridge || !ready) return;
+    if (!bridge || !ready) { setImage(null); return; }
     let alive = true;
     let timer: number;
-    let current: ImageBitmap | null = null;
     const refresh = async () => {
       try {
         const frame = await createImageBitmap(await bridge.frame());
@@ -61,13 +62,10 @@ export default function NativeSurface({ bridge, ready, profile, selected, onHudC
           frame.close();
           return;
         }
-        const previous = current;
-        current = frame;
         setImage(frame);
         setFrameError(null);
-        previous?.close();
       } catch (error) {
-        if (alive) setFrameError(String(error));
+        if (alive) { setFrameError(String(error)); onUnavailable("画面连接中断，战斗已暂停"); }
       } finally {
         if (alive) timer = window.setTimeout(refresh, 70);
       }
@@ -76,9 +74,8 @@ export default function NativeSurface({ bridge, ready, profile, selected, onHudC
     return () => {
       alive = false;
       window.clearTimeout(timer);
-      current?.close();
     };
-  }, [bridge, ready]);
+  }, [bridge, ready, onUnavailable]);
 
   return <div className="native-surface">
     <div className="native-surface-label">敌方 · 原生手牌与圣水</div>

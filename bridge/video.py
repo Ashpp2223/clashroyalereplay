@@ -14,6 +14,8 @@ class NativeFrameStream:
         self.latest: bytes | None = None
         self.last_frame_at = 0.0
         self.error: str | None = None
+        self.frames_received = 0
+        self.sessions_started = 0
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._adb_process: subprocess.Popen | None = None
@@ -51,11 +53,13 @@ class NativeFrameStream:
                      "--time-limit", "180", "-"], stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, creationflags=flags)
                 self._decoder_process = subprocess.Popen(
-                    [ffmpeg, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer",
+                    [ffmpeg, "-hide_banner", "-loglevel", "error", "-flags", "low_delay",
+                     "-probesize", "32", "-analyzeduration", "0",
                      "-f", "h264", "-i", "pipe:0", "-vf", "fps=20", "-q:v", "5",
-                     "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"],
+                     "-f", "image2pipe", "-vcodec", "mjpeg", "-flush_packets", "1", "pipe:1"],
                     stdin=self._adb_process.stdout, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, creationflags=flags)
+                self.sessions_started += 1
                 self._adb_process.stdout.close()
                 self._read_frames(self._decoder_process.stdout)
                 self.error = "Android 视频流中断，正在重连"
@@ -93,5 +97,6 @@ class NativeFrameStream:
                 del pending[:end + 2]
                 with self._lock:
                     self.latest = frame
+                    self.frames_received += 1
                     self.last_frame_at = time.monotonic()
                     self.error = None

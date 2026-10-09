@@ -43,37 +43,38 @@ class BattleController:
         self.last_error: str | None = None
 
     def status(self) -> dict:
-        with self.lock:
-            return {
-                "stage": self.runtime.stage if self.runtime else "测试环境",
-                "ready": self.engine is not None,
-                "playing": self.playing,
-                "error": self.last_error,
-                "identity": {
-                    "upstreamCommit": UPSTREAM_COMMIT,
-                    "probeSha256": PROBE_SHA256,
-                    "apkSha256": self.runtime.apk_sha256 if self.runtime else MANIFEST["apk_sha256"],
-                    "libgSha256": MANIFEST["libg_sha256"],
-                    "runtimeFingerprintSha256": self.runtime.runtime_fingerprint_sha256 if self.runtime else MANIFEST["runtime_fingerprint_sha256"],
-                    "protocolVersion": "native-bridge.v1",
-                    "cropProfileId": "stock-v15-1080x1920",
-                },
-                "cropProfile": {
-                    "id": "stock-v15-1080x1920",
-                    "nativeWidth": 1080, "nativeHeight": 1920,
-                    "enemyHud": [0, 0, 1080, 282],
-                    "arena": [54, 282, 972, 1384],
-                    "myHud": [0, 1666, 1080, 254],
-                    "world": [111, 436, 856, 1230],
-                    "handCentersX": [211, 354, 497, 640],
-                    "enemyHandReversed": True,
-                },
-                "capabilities": self.attestation.get("capabilities") if self.attestation else None,
-            }
+        # Metadata reads must remain available during a long serialized replay.
+        return {
+            "stage": self.runtime.stage if self.runtime else "测试环境",
+            "ready": self.engine is not None,
+            "playing": self.playing,
+            "error": self.last_error,
+            "identity": {
+                "upstreamCommit": UPSTREAM_COMMIT,
+                "probeSha256": PROBE_SHA256,
+                "apkSha256": self.runtime.apk_sha256 if self.runtime else MANIFEST["apk_sha256"],
+                "libgSha256": MANIFEST["libg_sha256"],
+                "runtimeFingerprintSha256": self.runtime.runtime_fingerprint_sha256 if self.runtime else MANIFEST["runtime_fingerprint_sha256"],
+                "protocolVersion": "native-bridge.v1",
+                "cropProfileId": "stock-v15-1080x1920",
+            },
+            "cropProfile": {
+                "id": "stock-v15-1080x1920",
+                "nativeWidth": 1080, "nativeHeight": 1920,
+                "enemyHud": [0, 0, 1080, 282],
+                "arena": [54, 282, 972, 1384],
+                "myHud": [0, 1666, 1080, 254],
+                "world": [111, 436, 856, 1230],
+                "handCentersX": [211, 354, 497, 640],
+                "enemyHandReversed": True,
+            },
+            "capabilities": self.attestation.get("capabilities") if self.attestation else None,
+        }
 
     def start(self) -> dict:
         with self.lock:
             if self.engine is not None:
+                self.last_error = None
                 return self.status()
         if self.runtime is None:
             raise RuntimeError("无 Android 运行时")
@@ -90,6 +91,20 @@ class BattleController:
                 self.last_error = str(error)
                 self.runtime.stage = "启动失败"
             raise
+
+    def suspend(self, reason: str) -> dict:
+        with self.lock:
+            if self.playing and self.engine:
+                try:
+                    self.pause()
+                except Exception:
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+            self.playing = False
+            self.last_error = reason
+            return {"playing": False, "error": reason}
 
     def reset(self, seed: int) -> dict:
         with self.lock:
@@ -119,6 +134,7 @@ class BattleController:
         with self.lock:
             self._engine().resume()
             self.playing = True
+            self.last_error = None
             return {"playing": True}
 
     def speed(self, multiplier: float) -> dict:

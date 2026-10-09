@@ -76,3 +76,12 @@ test("time seek chooses the nearest cached ancestor, never a sibling or future n
   assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 130, cached)?.id, two.node.id);
   assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 120, new Set([sibling.node.id])), null);
 });
+
+test("unsupported abilities, cards, seeds and missing engine identity are rejected before replay", () => {
+  const project = createNativeProject(identity, match, 90, "root");
+  const work = advanceNativeWork(checkoutNativeNode(project, project.rootNodeId), 91);
+  assert.throws(() => appendConfirmedNativeAction(project, work, { ...play(91, 1), nativeCardId: 26000999 }));
+  assert.throws(() => appendConfirmedNativeAction(project, work, { ...play(91, 1), kind: "activate-ability", nativeEntityId: 1, nativeAbilityId: 2 }));
+  assert.throws(() => validateNativeProject({ ...project, match: { ...match, seed: -1 } }));
+  assert.throws(() => validateNativeProject({ ...project, engine: { upstreamCommit: "only-one-field" } }));
+});

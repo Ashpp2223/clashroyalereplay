@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
@@ -9,7 +9,7 @@ import {
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
 import { arenaPixelToWorld, handSlotAtPixel } from "./native/geometry.ts";
 import NativeSurface from "./native/NativeSurface.tsx";
-import { openNativeProject, saveNativeProject } from "./native/files.ts";
+import { openNativeProject, saveNativeProject, rememberNativeSession, reopenNativeSession } from "./native/files.ts";
 import { clearNativeJournal, readNativeJournal, writeNativeJournal } from "./native/journal.ts";
 import "./native.css";
 
@@ -31,6 +31,7 @@ export default function NativeApp() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [notice, setNotice] = useState("准备启动原生战斗环境");
   const [busy, setBusy] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const initialized = useRef(false);
   const busyRef = useRef(false);
   const projectRef = useRef(project);
@@ -38,6 +39,22 @@ export default function NativeApp() {
   const observationRef = useRef(observation);
   const snapshots = useRef(new Map<string, number>());
   const scrubRouteRef = useRef(scrubRoute);
+  const connectionErrorRef = useRef<string | null>(null);
+  const bridgeRef = useRef<NativeBridge | null>(null);
+  const recoveryNode = useRef<string | null>(null);
+
+  const interrupt = useCallback((reason: string): void => {
+    if (connectionErrorRef.current) return;
+    connectionErrorRef.current = reason;
+    setConnectionError(reason);
+    setSelected(null);
+    const source = projectRef.current;
+    const work = branchRef.current;
+    if (source && work?.actions.length) {
+      void writeNativeJournal(source, work).catch((error) => setNotice(`草稿写入失败，请保留窗口：${String(error)}`));
+    }
+    void bridgeRef.current?.post("/v1/suspend").catch(() => undefined);
+  }, []);
 
   function putProject(value: NativeReplayProject | null): void {
     projectRef.current = value;
@@ -96,6 +113,7 @@ export default function NativeApp() {
   async function replayTo(client: NativeBridge, source: NativeReplayProject, nodeId: string,
                           actions: NativeBattleAction[], targetTick: number,
                           expectedDigest?: string): Promise<NativeObservation> {
+    setNotice(`正在恢复至 ${formatNativeTick(targetTick)}，请稍候…`);
     const path = nativePathToNode(source, nodeId);
     const targetNode = expectedDigest && path.find((node) =>
       node.finalTick === targetTick && node.stateDigest === expectedDigest);
@@ -128,33 +146,57 @@ export default function NativeApp() {
 
   useEffect(() => {
     let alive = true;
-    NativeBridge.launch().then((client) => {
+    NativeBridge.launch().then(async (client) => {
       if (!alive) return;
+      try {
+        const previous = await reopenNativeSession();
+        if (!alive) return;
+        if (previous) {
+          putProject(previous.project);
+          putBranch(checkoutNativeNode(previous.project, previous.nodeId));
+          setFilePath(previous.path);
+          recoveryNode.current = previous.nodeId;
+        }
+      } catch (error) { setNotice(`上次项目无法读取，请重新打开：${String(error)}`); }
+      bridgeRef.current = client;
       setBridge(client);
       void client.post<BridgeStatus>("/v1/start").then(setStatus).catch((error) => setNotice(String(error)));
-    }).catch((error) => setNotice(String(error)));
+    }).catch((error) => { setNotice(String(error)); interrupt("战斗服务未启动，请设置运行环境后重试"); });
     return () => { alive = false; };
   }, []);
 
   useEffect(() => {
+    if (filePath && branch?.checkedOutNodeId) rememberNativeSession(filePath, branch.checkedOutNodeId);
+  }, [filePath, branch?.checkedOutNodeId]);
+
+  useEffect(() => {
     if (!bridge) return;
     let alive = true;
+    let refreshing = false;
     const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
       try {
         const latest = await bridge.get<BridgeStatus>("/v1/status");
         if (!alive) return;
         setStatus(latest);
-        if (latest.error) setNotice(latest.error);
-        if (latest.ready && !initialized.current && !busyRef.current) {
+        if (latest.error) { setNotice(latest.error); interrupt(latest.error); }
+        if (latest.ready && !initialized.current && !busyRef.current && !connectionErrorRef.current) {
           initialized.current = true;
           await exclusive(async () => {
             const loaded = projectRef.current;
             if (loaded) {
-              const root = loaded.nodes[loaded.rootNodeId];
-              let state = await bridge.replay(loaded.match.seed, [], root.finalTick, root.stateDigest);
-              await rememberSnapshot(bridge, loaded.rootNodeId, root.finalTick);
+              if (Object.entries(latest.identity).some(([key, value]) =>
+                loaded.engine[key as keyof typeof latest.identity] !== value)) {
+                interrupt("项目与当前引擎版本不匹配，请打开匹配的项目");
+                throw new Error("项目与当前引擎版本不匹配");
+              }
+              const root = loaded.nodes[recoveryNode.current ?? loaded.rootNodeId] ?? loaded.nodes[loaded.rootNodeId];
+              let state = await bridge.replay(loaded.match.seed, nativeActionsToNode(loaded, root.id), root.finalTick, root.stateDigest);
+              await rememberSnapshot(bridge, root.id, root.finalTick);
               putObservation(state);
-              putBranch(checkoutNativeNode(loaded, loaded.rootNodeId));
+              putBranch(checkoutNativeNode(loaded, root.id));
+              recoveryNode.current = null;
               putScrubRoute(null);
               const journal = await readNativeJournal(loaded);
               if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
@@ -184,21 +226,85 @@ export default function NativeApp() {
           });
           if (!observationRef.current) initialized.current = false;
         }
-        if (latest.ready && latest.playing && !busyRef.current && observationRef.current) {
+        if (latest.ready && latest.playing && !busyRef.current && observationRef.current && !connectionErrorRef.current) {
           const state = await bridge.get<NativeObservation>("/v1/observe");
           if (!alive || busyRef.current) return;
           putObservation(state);
           const work = branchRef.current;
-          if (work && state.tick >= work.workingTick) putBranch(advanceNativeWork(work, state.tick));
+          if (work && state.tick >= work.workingTick) {
+            const next = advanceNativeWork(work, state.tick);
+            putBranch(next);
+            if (projectRef.current && next.actions.length) await writeNativeJournal(projectRef.current, next);
+          }
         }
       } catch (error) {
-        if (alive) setNotice(`连接中断：${String(error)}`);
+        if (alive) { setNotice(`连接中断：${String(error)}`); interrupt("连接中断，请恢复到已保存节点"); }
+      } finally {
+        refreshing = false;
       }
     };
     void refresh();
     const interval = window.setInterval(() => { void refresh(); }, 450);
     return () => { alive = false; window.clearInterval(interval); };
-  }, [bridge]);
+  }, [bridge, interrupt]);
+
+  async function reconnect(): Promise<void> {
+    await exclusive(async () => {
+      recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
+      snapshots.current.clear();
+      initialized.current = false;
+      putObservation(null);
+      const client = await NativeBridge.launch();
+      bridgeRef.current = client;
+      await client.post<BridgeStatus>("/v1/start");
+      connectionErrorRef.current = null;
+      setConnectionError(null);
+      setBridge(client);
+      setNotice("正在恢复到已保存节点，草稿将从恢复日志读取");
+    });
+  }
+
+  async function configureRuntime(): Promise<void> {
+    await exclusive(async () => {
+      const [{ open }, { invoke }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"), import("@tauri-apps/api/core")
+      ]);
+      const directory = await open({ directory: true, multiple: false,
+        title: "选择已准备好的战斗运行环境目录" });
+      if (!directory || Array.isArray(directory)) return;
+      if (projectRef.current && branchRef.current?.actions.length) {
+        await writeNativeJournal(projectRef.current, branchRef.current);
+      }
+      await invoke("configure_native_runtime", { directory });
+      recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
+      snapshots.current.clear();
+      initialized.current = false;
+      putObservation(null);
+      const client = await NativeBridge.launch();
+      bridgeRef.current = client;
+      await client.post("/v1/start");
+      connectionErrorRef.current = null;
+      setConnectionError(null);
+      setBridge(client);
+      setNotice("运行环境已设置，正在连接战斗");
+    });
+  }
+
+  async function exportDiagnostics(): Promise<void> {
+    await exclusive(async () => {
+      const [{ save }, { invoke }] = await Promise.all([
+        import("@tauri-apps/plugin-dialog"), import("@tauri-apps/api/core")
+      ]);
+      const record = bridgeRef.current ? await bridgeRef.current.get("/v1/diagnostics").catch(() => null) : null;
+      const path = await save({ title: "保存诊断记录", defaultPath: "复盘器诊断.json",
+        filters: [{ name: "诊断记录", extensions: ["json"] }] });
+      if (!path) return;
+      await invoke("write_project_file", { path, data: JSON.stringify(record ?? {
+        schema: "cr-native-diagnostics.v1", ready: false, error: connectionErrorRef.current ?? "战斗服务未连接"
+      }, null, 2) });
+      setNotice("诊断记录已保存，未包含会话口令或项目内容");
+    });
+  }
 
   const profile = status?.cropProfile ?? EMPTY_PROFILE;
   const currentNode = project && branch ? project.nodes[branch.checkedOutNodeId] : null;
@@ -401,6 +507,7 @@ export default function NativeApp() {
   }
 
   function selectHand(owner: 0 | 1, pixel: { x: number; y: number }): void {
+    if (connectionErrorRef.current || busyRef.current || !status?.ready || !observationRef.current) return;
     const slot = handSlotAtPixel(profile, owner, pixel);
     if (slot === null) return;
     setSelected({ owner, slot });
@@ -408,6 +515,7 @@ export default function NativeApp() {
   }
 
   async function playAt(pixel: { x: number; y: number }): Promise<void> {
+    if (connectionErrorRef.current || busyRef.current || !status?.ready) return;
     if (!selected || !bridge || !projectRef.current || !branchRef.current) return;
     const world = arenaPixelToWorld(profile, pixel);
     await exclusive(async () => {
@@ -420,7 +528,9 @@ export default function NativeApp() {
       if (receipt.accepted && receipt.action) {
         work = appendConfirmedNativeAction(projectRef.current!, work,
           { ...receipt.action, id: crypto.randomUUID() });
-        await writeNativeJournal(projectRef.current!, work);
+        putBranch(work);
+        try { await writeNativeJournal(projectRef.current!, work); }
+        catch (error) { interrupt("草稿保存失败，请恢复连接后重试保存"); throw error; }
         setNotice(`已确认 ${selected.owner === 1 ? "我方" : "敌方"}出牌；当前为新分支草稿`);
       } else if (work.actions.length) {
         await writeNativeJournal(projectRef.current!, work);
@@ -477,7 +587,7 @@ export default function NativeApp() {
     const node = project.nodes[id];
     return <div key={id}>
       <button className={`tree-node ${branch?.checkedOutNodeId === id ? "active" : ""}`}
-        style={{ paddingLeft: 14 + depth * 18 }} onClick={() => { void checkout(id); }}>
+        style={{ paddingLeft: 14 + depth * 18 }} onClick={() => { void checkout(id); }} disabled={!ready || busy}>
         <span className="tree-node-line">{node.title}</span>
         <small>{formatNativeTick(node.finalTick)} · {node.actionsFromParent.length} 动作</small>
       </button>
@@ -487,7 +597,7 @@ export default function NativeApp() {
 
   const ownElixir = observation?.players.find((player) => player.owner === 1)?.elixir;
   const enemyElixir = observation?.players.find((player) => player.owner === 0)?.elixir;
-  const ready = Boolean(status?.ready && observation);
+  const ready = Boolean(status?.ready && observation && !connectionError);
 
   return <div className="native-app">
     <header className="native-header">
@@ -495,18 +605,21 @@ export default function NativeApp() {
         <div><strong>皇室战争 · 原生战斗复盘</strong><small>时间线与平行分支</small></div></div>
       <div className="native-header-actions">
         <button onClick={() => { void newProject(); }} disabled={!status?.ready || busy}>新战斗</button>
-        <button onClick={() => { void openProject(); }} disabled={busy}>打开 v2</button>
+        <button onClick={() => { void openProject(); }} disabled={busy}>打开项目</button>
+        <button onClick={() => { void configureRuntime(); }} disabled={busy}>设置运行环境</button>
+        <button onClick={() => { void exportDiagnostics(); }} disabled={busy}>导出诊断</button>
         <button className="primary" onClick={() => { void saveProject(); }} disabled={!project || busy}>保存</button>
       </div>
     </header>
     <div className="native-workspace">
       <aside className="native-sidebar">
         <div className="panel-heading"><span>时间分支</span><span>{project ? Object.keys(project.nodes).length : 0} 节点</span></div>
-        <div className="native-project-title">{project?.title ?? "等待战斗启动"}</div>
+        <div className="native-project-title">{project ? <input aria-label="战斗名称" value={project.title}
+          onChange={(event) => putProject({ ...project, title: event.target.value, updatedAt: new Date().toISOString() })} /> : "等待战斗启动"}</div>
         <div className="native-tree">{project && renderNode(project.rootNodeId)}</div>
         <button className="wide-button" onClick={() => { void checkpoint(); }}
           disabled={!ready || busy || !branch || !currentNode || branch.workingTick <= currentNode.finalTick}>
-          ＋ 在当前 tick 创建节点
+          ＋ 保存当前节点
         </button>
         {branch && branch.actions.length > 0 && <div className="draft-note">● 新分支草稿 · {branch.actions.length} 个已确认动作</div>}
       </aside>
@@ -521,13 +634,16 @@ export default function NativeApp() {
           </div>
         </div>
         <div className="battle-stage"><NativeSurface bridge={bridge} ready={ready} profile={profile}
-          selected={selected} onHudClick={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} /></div>
+          selected={selected} onHudClick={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} /></div>
+        {connectionError && <div className="native-recovery" role="alert">
+          <span>{connectionError}</span><button onClick={() => { void reconnect(); }} disabled={busy}>恢复连接</button>
+        </div>}
         <div className="playback-controls">
           <button onClick={() => { void seek(Math.max(project?.nodes[project.rootNodeId].finalTick ?? 90,
-            (observation?.tick ?? 91) - 1)); }} disabled={!ready || busy}>◀│ 后退 1 tick</button>
+            (observation?.tick ?? 91) - 1)); }} disabled={!ready || busy}>◀│ 后退一步</button>
           <button className="play-button" onClick={() => { void togglePlay(); }} disabled={!ready || busy}>
             {status?.playing ? "Ⅱ 暂停" : "▶ 播放"}</button>
-          <button onClick={() => { void stepForward(); }} disabled={!ready || busy}>前进 1 tick │▶</button>
+          <button onClick={() => { void stepForward(); }} disabled={!ready || busy}>前进一步 │▶</button>
           <select aria-label="播放速度" value={speed} onChange={(event) => { void changeSpeed(Number(event.target.value)); }}
             disabled={!ready || busy}>{[0.25, 0.5, 1, 2, 4].map((value) =>
               <option value={value} key={value}>{value}×</option>)}</select>
@@ -547,7 +663,7 @@ export default function NativeApp() {
           <div className="inspector-stat"><span>本段动作</span><strong>{currentNode.actionsFromParent.length}</strong></div>
           <label>备注<textarea rows={8} value={currentNode.note}
             onChange={(event) => editNode({ note: event.target.value })} placeholder="记录这一条时间线的判断…" /></label>
-          <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!currentNode.parentId || busy}>删除此分支及后代</button>
+          <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode.parentId || busy}>删除此分支及后代</button>
         </> : <p className="inspector-empty">战斗就绪后会显示节点信息。</p>}
         <div className="runtime-card"><strong>运行时</strong>
           <span>{status?.stage ?? "未连接"}</span>

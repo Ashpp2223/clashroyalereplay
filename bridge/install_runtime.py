@@ -16,6 +16,7 @@ import uuid
 import zipfile
 
 from .runtime import MANIFEST, CONTENT_LOCK, PROBE_SHA256, ROOT, android_sdk, sha256
+from .paths import RUNTIME_HOME
 
 PACKAGE = MANIFEST["package"]
 DATA = f"/data/user/0/{PACKAGE}"
@@ -139,7 +140,7 @@ def recover_pending_downloads(device: Device, hashes: dict[str, str]) -> dict[st
             raise ValueError(f"恢复后的资源校验失败：{target}")
         updated[target] = hashes[name]
     if plan:
-        save_receipt(ROOT / ".local-runtime/pending-resource-recovery.json",
+        save_receipt(RUNTIME_HOME / "pending-resource-recovery.json",
                      {"serial": device.serial, "fingerprintSha256": hashes["fingerprint.json"],
                       "restored": [{"source": name, "file": target, "sha256": hashes[name]} for name, target in plan]})
     return updated
@@ -395,7 +396,7 @@ def main() -> None:
     elif args.restore:
         result = restore(device, json.loads(args.restore.read_text(encoding="utf-8")), args.restore)
     else:
-        receipt = args.receipt or ROOT / ".local-runtime" / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", args.serial) + ".json")
+        receipt = args.receipt or RUNTIME_HOME / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", args.serial) + ".json")
         result = install(device, args.original_apk or args.update_apk or args.apk, receipt,
                          original=args.original_apk is not None, update=args.update_apk is not None)
     print(json.dumps({key: value for key, value in result.items() if key != "resourceHashes"}, ensure_ascii=False))

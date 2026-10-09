@@ -27,3 +27,19 @@ export async function saveNativeProject(project: NativeReplayProject, currentPat
   await invoke("write_project_file", { path, data: JSON.stringify(project, null, 2) });
   return path;
 }
+
+const LAST_SESSION = "clash-native.last-session";
+
+export function rememberNativeSession(path: string, nodeId: string): void {
+  localStorage.setItem(LAST_SESSION, JSON.stringify({ path, nodeId }));
+}
+
+export async function reopenNativeSession(): Promise<{ project: NativeReplayProject; path: string; nodeId: string } | null> {
+  const text = localStorage.getItem(LAST_SESSION);
+  if (!text) return null;
+  const session = JSON.parse(text) as { path: string; nodeId: string };
+  if (typeof session.path !== "string" || typeof session.nodeId !== "string") throw new Error("上次打开记录无效");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const project = validateNativeProject(JSON.parse(await invoke<string>("read_project_file", { path: session.path })));
+  return { project, path: session.path, nodeId: project.nodes[session.nodeId] ? session.nodeId : project.rootNodeId };
+}

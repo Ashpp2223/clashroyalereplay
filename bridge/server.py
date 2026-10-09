@@ -8,6 +8,10 @@ import json
 import os
 import secrets
 import threading
+import sys
+import time
+from pathlib import Path
+from .paths import RUNTIME_HOME
 from urllib.parse import urlparse
 
 from .controller import BattleController
@@ -25,7 +29,20 @@ class BridgeServer(ThreadingHTTPServer):
         self.token = token
         self.controller = controller
         self.start_thread: threading.Thread | None = None
+        self.last_contact = time.monotonic()
+        self._stopped = threading.Event()
         super().__init__(("127.0.0.1", port), BridgeRequest)
+        self._watchdog = threading.Thread(target=self._watch, daemon=True)
+        self._watchdog.start()
+
+    def _watch(self):
+        while not self._stopped.wait(0.5):
+            if self.controller.playing and time.monotonic() - self.last_contact > 5:
+                self.controller.suspend("桌面连接中断，战斗已暂停")
+
+    def server_close(self):
+        self._stopped.set()
+        super().server_close()
 
 
 class BridgeRequest(BaseHTTPRequestHandler):
@@ -43,8 +60,10 @@ class BridgeRequest(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def _authorized(self) -> bool:
-        return secrets.compare_digest(self.headers.get("Authorization", ""),
-                                      "Bearer " + self.server.token)
+        valid = secrets.compare_digest(self.headers.get("Authorization", ""), "Bearer " + self.server.token)
+        if valid:
+            self.server.last_contact = time.monotonic()
+        return valid
 
     def _send(self, status: int, body: dict | bytes, content_type: str = "application/json") -> None:
         payload = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -72,6 +91,20 @@ class BridgeRequest(BaseHTTPRequestHandler):
         try:
             if path == "/v1/status":
                 self._send(200, self.server.controller.status())
+            elif path == "/v1/diagnostics":
+                status = self.server.controller.status()
+                error = str(status.get("error") or "")
+                stream = self.server.controller.runtime.video if self.server.controller.runtime else None
+                video_error = str(stream.error or "") if stream else ""
+                for private in (str(RUNTIME_HOME), str(Path.home())):
+                    error = error.replace(private, "<本机目录>").replace(private.replace("\\", "/"), "<本机目录>")
+                    video_error = video_error.replace(private, "<本机目录>").replace(private.replace("\\", "/"), "<本机目录>")
+                self._send(200, {"schema": "cr-native-diagnostics.v1", "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                                  "stage": status["stage"], "ready": status["ready"], "playing": status["playing"],
+                                  "error": error[:1000], "identity": status["identity"], "capabilities": status["capabilities"],
+                                  "video": {"ready": bool(stream and stream.frame()), "error": video_error[:1000],
+                                            "framesReceived": stream.frames_received if stream else 0,
+                                            "sessionsStarted": stream.sessions_started if stream else 0}})
             elif path == "/v1/observe":
                 self._send(200, self.server.controller.observe())
             elif path == "/v1/frame":
@@ -80,6 +113,8 @@ class BridgeRequest(BaseHTTPRequestHandler):
             else:
                 self._send(404, {"error": "not found"})
         except Exception as error:
+            if path in ("/v1/frame", "/v1/observe"):
+                self.server.controller.suspend("画面或战斗连接中断，已暂停")
             self._send(409, {"error": str(error)})
 
     def do_POST(self) -> None:
@@ -104,6 +139,11 @@ class BridgeRequest(BaseHTTPRequestHandler):
                 result = controller.reset(body.get("seed", 1))
             elif path == "/v1/pause":
                 result = controller.pause()
+            elif path == "/v1/suspend":
+                result = controller.suspend("画面或桌面连接中断，已暂停")
+            elif path == "/v1/shutdown":
+                result = {"stopping": True}
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
             elif path == "/v1/resume":
                 result = controller.resume()
             elif path == "/v1/speed":
@@ -143,12 +183,21 @@ class BridgeRequest(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--parent-stdin", action="store_true")
     arguments = parser.parse_args()
     token = os.environ.get("CR_BRIDGE_TOKEN")
     if not token or len(token) < 32:
         raise SystemExit("CR_BRIDGE_TOKEN is required")
     server = BridgeServer(arguments.port, token, BattleController(AndroidRuntime()))
     print(json.dumps({"port": server.server_address[1], "protocol": "native-bridge.v1"}), flush=True)
+    if arguments.parent_stdin:
+        def parent_watch():
+            # EOF also handles the desktop process crashing or being terminated.
+            for line in sys.stdin:
+                if line.strip() == "shutdown":
+                    break
+            server.shutdown()
+        threading.Thread(target=parent_watch, daemon=True).start()
     try:
         server.serve_forever(poll_interval=0.2)
     finally:

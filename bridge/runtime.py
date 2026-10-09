@@ -13,10 +13,9 @@ import sys
 import time
 
 from .video import NativeFrameStream
+from .paths import ROOT, VENDOR, RUNTIME_HOME
 
 
-ROOT = Path(__file__).resolve().parents[1]
-VENDOR = ROOT / "vendor" / "clash-royale-battle-engine"
 MANIFEST = json.loads((VENDOR / "vendor" / "firstlight" / "supported_engine.json").read_text())
 CONTENT_LOCK = json.loads((ROOT / "bridge/content_lock.json").read_text(encoding="utf-8"))
 UPSTREAM_COMMIT = "f92ccbecd6a1c9ad1fa3abaca54a51110607b6df"
@@ -57,7 +56,7 @@ class AndroidRuntime:
         self.video: NativeFrameStream | None = None
         self.owns_session = False
         self.runtime_fingerprint_sha256 = MANIFEST["runtime_fingerprint_sha256"]
-        config_path = ROOT / ".local-runtime/runtime.json"
+        config_path = RUNTIME_HOME / "runtime.json"
         self.config = json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.exists() else {}
         if self.config.get("sdkRoot") and not os.environ.get("ANDROID_SDK_ROOT") and not os.environ.get("ANDROID_HOME"):
             self.sdk = Path(self.config["sdkRoot"])
@@ -68,7 +67,7 @@ class AndroidRuntime:
 
     @staticmethod
     def _prepared_apk_hash() -> str:
-        prepared = ROOT / ".local-runtime" / "prepared.json"
+        prepared = RUNTIME_HOME / "prepared.json"
         if prepared.exists():
             data = json.loads(prepared.read_text(encoding="utf-8-sig"))
             path = Path(data.get("path", ""))
@@ -118,13 +117,8 @@ class AndroidRuntime:
         self._check_installed_runtime()
         self.stage = "启动原生探针"
         self.owns_session = True
-        result = subprocess.run([sys.executable, "-m", "bridge.bootstrap_runtime", "--serial", self.serial,
-                                 "--adb", str(self.adb), "--timeout", "90"], cwd=ROOT, capture_output=True, text=True,
-                                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-                                encoding="utf-8", errors="replace", timeout=120, check=False,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if result.returncode:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "原生探针启动失败")
+        from .bootstrap_runtime import bootstrap
+        bootstrap(str(self.adb), self.serial, timeout=90)
         self.stage = "读取能力声明"
         attest = self._attest()
         self.video = NativeFrameStream(str(self.adb), self.serial)
@@ -139,12 +133,12 @@ class AndroidRuntime:
         port = int(self.preferred_serial.removeprefix("emulator-"))
         if port < 5554 or port > 5682 or port % 2:
             raise RuntimeError("开发模拟器端口必须为 5554～5682 的偶数")
-        avd_home = Path(self.config.get("avdHome", str(ROOT / ".local-runtime/avd")))
+        avd_home = Path(self.config.get("avdHome", str(RUNTIME_HOME / "avd")))
         if not (avd_home / (self.avd_name + ".ini")).is_file():
             raise RuntimeError("开发虚拟设备未准备；请运行 scripts/prepare_dev_emulator.ps1")
         self.stage = "启动 Android 开发环境"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        log = ROOT / ".local-runtime/dev-emulator.log"
+        log = RUNTIME_HOME / "dev-emulator.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("ab") as output:
             self.process = subprocess.Popen(
@@ -237,7 +231,7 @@ class AndroidRuntime:
     def _install_local_prepared(self) -> None:
         if not self.serial or not (self.serial.startswith("emulator-") or self.serial.startswith("127.0.0.1:")):
             raise RuntimeError("连接的是物理设备；请手动安装经过探针准备的游戏 APK")
-        prepared = ROOT / ".local-runtime" / "prepared.json"
+        prepared = RUNTIME_HOME / "prepared.json"
         if not prepared.exists():
             raise RuntimeError("未安装经过探针准备的游戏 APK；请先运行准备脚本")
         data = json.loads(prepared.read_text(encoding="utf-8-sig"))
@@ -246,7 +240,7 @@ class AndroidRuntime:
             raise RuntimeError("本地准备的 APK 缺失或哈希不符")
         self.stage = "安装原生战斗运行时"
         from .install_runtime import Device, install
-        receipt = ROOT / ".local-runtime" / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", self.serial) + ".json")
+        receipt = RUNTIME_HOME / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", self.serial) + ".json")
         install(Device(str(self.adb), self.serial), path, receipt)
 
     def _check_updated_content(self) -> None:

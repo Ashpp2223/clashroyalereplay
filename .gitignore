@@ -15,3 +15,5 @@ src-tauri/gen
 /configs/customer_config.json
 /configs/vm_config.json
 *.lnk
+/src-tauri/resources/native-bridge/
+/release/native-desktop/

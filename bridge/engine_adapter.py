@@ -5,9 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
-
-
-VENDOR = Path(__file__).resolve().parents[1] / "vendor" / "clash-royale-battle-engine"
+from .paths import VENDOR
 
 
 def _load_package() -> None:

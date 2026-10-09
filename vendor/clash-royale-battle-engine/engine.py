@@ -155,9 +155,13 @@ class RenderedEngine(Engine):
             )
             if not queued.get('ok'):
                 raise RuntimeError(queued.get('error', 'could not queue rendered action'))
-        advanced = self.request(f'advance-native {ticks}')
-        if not advanced.get('ok'):
-            raise RuntimeError(advanced.get('error', 'could not advance native renderer'))
+        remaining = ticks
+        while remaining:
+            chunk = min(remaining, 200)
+            advanced = self.request(f'advance-native {chunk}')
+            if not advanced.get('ok'):
+                raise RuntimeError(advanced.get('error', 'could not advance native renderer'))
+            remaining -= chunk
         after = self._capture(before.generation, before.next_sequence)
         executed = tuple(any(event.owner == action.owner and event.card == card
                              and event.tick == before.tick + 1

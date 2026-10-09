@@ -60,7 +60,7 @@ export class NativeBridge {
 
   async frame(): Promise<Blob> {
     const response = await fetch(this.url("/v1/frame"), {
-      headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store"
+      headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store", signal: AbortSignal.timeout(8000)
     });
     if (!response.ok) throw new Error(`画面读取失败：${response.status}`);
     return response.blob();
@@ -86,7 +86,8 @@ export class NativeBridge {
         ...(body ? { "Content-Type": "application/json" } : {})
       },
       body: body ? JSON.stringify(body) : undefined,
-      cache: "no-store"
+      cache: "no-store",
+      signal: AbortSignal.timeout(method === "GET" ? 8000 : 600000)
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `桥接请求失败：${response.status}`);

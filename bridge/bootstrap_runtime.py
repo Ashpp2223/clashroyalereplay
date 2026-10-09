@@ -9,7 +9,8 @@ import re
 import subprocess
 import time
 
-from .runtime import DEVICE_PORT, ROOT, VENDOR, android_sdk
+from .runtime import DEVICE_PORT, VENDOR, android_sdk
+from .paths import RUNTIME_HOME
 
 RULE_COMMENT = "cr-replay-offline"
 
@@ -77,7 +78,7 @@ def wait_until_ready(upstream, adb: str, serial: str, port: int, timeout: float)
             if process.returncode == 1 and not process.stdout.strip():
                 crash = cleanup_command(adb, serial, "logcat", "-d", "-b", "crash", "-t", "100")
                 if crash is not None:
-                    path = ROOT / ".local-runtime/native-startup-crash.log"
+                    path = RUNTIME_HOME / "native-startup-crash.log"
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(crash.stdout, encoding="utf-8")
                 raise RuntimeError("原生游戏进程已退出，未进入战斗；启动记录见 .local-runtime/native-startup-crash.log")

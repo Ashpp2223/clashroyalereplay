@@ -6,8 +6,9 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Mutex, mpsc},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::Manager;
 
@@ -17,6 +18,50 @@ struct BridgeState(Mutex<Option<BridgeProcess>>);
 struct BridgeProcess {
     child: Child,
     info: BridgeInfo,
+    #[cfg(windows)]
+    _job: ScopedJob,
+}
+
+#[cfg(windows)]
+struct ScopedJob(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for ScopedJob {}
+#[cfg(windows)]
+impl ScopedJob {
+    fn own(child: &Child) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle.is_null() { return Err(format_io_error(std::io::Error::last_os_error())); }
+            let job = Self(handle);
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(handle, JobObjectExtendedLimitInformation, &limits as *const _ as *const _,
+                std::mem::size_of_val(&limits) as u32) == 0 || AssignProcessToJobObject(handle, child.as_raw_handle()) == 0 {
+                return Err(format_io_error(std::io::Error::last_os_error()));
+            }
+            Ok(job)
+        }
+    }
+}
+#[cfg(windows)]
+impl Drop for ScopedJob {
+    fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } }
+}
+
+fn retire_bridge(mut process: BridgeProcess) {
+    if let Some(mut input) = process.child.stdin.take() {
+        let _ = input.write_all(b"shutdown\n");
+        let _ = input.flush();
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if process.child.try_wait().ok().flatten().is_some() { return; }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = process.child.kill();
+    let _ = process.child.wait();
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -153,7 +198,7 @@ fn clear_native_journal(app: tauri::AppHandle, project_id: String) -> Result<(),
 }
 
 #[tauri::command]
-fn start_native_bridge(state: tauri::State<BridgeState>) -> Result<BridgeInfo, String> {
+async fn start_native_bridge(app: tauri::AppHandle, state: tauri::State<'_, BridgeState>) -> Result<BridgeInfo, String> {
     let mut guard = state.0.lock().map_err(|error| error.to_string())?;
     if let Some(process) = guard.as_mut() {
         if process.child.try_wait().map_err(format_io_error)?.is_none() {
@@ -166,35 +211,77 @@ fn start_native_bridge(state: tauri::State<BridgeState>) -> Result<BridgeInfo, S
         .parent()
         .ok_or("Cannot resolve repository root")?
         .to_path_buf();
-    if !root.join("bridge").join("server.py").exists() {
-        return Err("Native bridge files are unavailable.".to_string());
-    }
     let mut secret = [0u8; 32];
     getrandom::getrandom(&mut secret).map_err(|error| error.to_string())?;
     let token: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
-    let python = std::env::var("CR_BRIDGE_PYTHON").unwrap_or_else(|_| "python".to_string());
-    let mut command = Command::new(python);
-    command
-        .arg("-m")
-        .arg("bridge.server")
-        .current_dir(root)
+    let resources = app.path().resource_dir().map_err(|error| error.to_string())?;
+    let bundled = resources.join("native-bridge/native-bridge.exe");
+    let runtime_home = if cfg!(debug_assertions) {
+        root.join(".local-runtime")
+    } else {
+        app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime")
+    };
+    fs::create_dir_all(&runtime_home).map_err(format_io_error)?;
+    // ADB is a shared host service. Start it outside the owned bridge job so
+    // retiring this application cannot terminate other emulator connections.
+    let settings = fs::read_to_string(runtime_home.join("runtime.json")).ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let default_sdk = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Android/Sdk");
+    let sdk = settings.as_ref().and_then(|value| value["sdkRoot"].as_str()).map(PathBuf::from).unwrap_or(default_sdk);
+    let adb = sdk.join("platform-tools/adb.exe");
+    if adb.is_file() {
+        let mut adb_start = Command::new(adb);
+        adb_start.arg("start-server").stdout(Stdio::null()).stderr(Stdio::null());
+        #[cfg(windows)] { use std::os::windows::process::CommandExt; adb_start.creation_flags(0x0800_0000); }
+        if let Ok(mut startup) = adb_start.spawn() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while startup.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+            if startup.try_wait().ok().flatten().is_none() { let _ = startup.kill(); let _ = startup.wait(); }
+        }
+    }
+    let mut command = if bundled.is_file() {
+        Command::new(&bundled)
+    } else if cfg!(debug_assertions) && root.join("bridge/server.py").is_file() {
+        let python = std::env::var("CR_BRIDGE_PYTHON").unwrap_or_else(|_| "python".to_string());
+        let mut value = Command::new(python);
+        value.args(["-m", "bridge.server"]).current_dir(&root);
+        value
+    } else {
+        return Err("安装中的战斗连接服务缺失，请重新安装应用。".to_string());
+    };
+    command.arg("--parent-stdin")
+        .env("CR_RUNTIME_HOME", &runtime_home)
+        .env("PYTHONIOENCODING", "utf-8")
         .env("CR_BRIDGE_TOKEN", &token)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .stdin(Stdio::null());
+        .stdin(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x0800_0000);
     }
     let mut child = command.spawn().map_err(format_io_error)?;
+    #[cfg(windows)]
+    let job = match ScopedJob::own(&child) {
+        Ok(value) => value,
+        Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error); }
+    };
     let stdout = child.stdout.take().ok_or("Bridge stdout unavailable")?;
-    let mut line = String::new();
-    BufReader::new(stdout)
-        .read_line(&mut line)
-        .map_err(format_io_error)?;
-    let greeting: BridgeGreeting = serde_json::from_str(&line)
-        .map_err(|_| "Native bridge failed to start; check Python and bridge dependencies.".to_string())?;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+        let _ = sender.send(result);
+    });
+    let greeting = receiver.recv_timeout(Duration::from_secs(12))
+        .ok().and_then(Result::ok).and_then(|line| serde_json::from_str::<BridgeGreeting>(&line).ok());
+    let greeting = match greeting {
+        Some(value) if value.port > 0 && value.protocol == "native-bridge.v1" => value,
+        _ => { let _ = child.kill(); let _ = child.wait(); return Err("战斗连接服务启动失败，请检查运行环境。".to_string()); }
+    };
     let info = BridgeInfo {
         port: greeting.port,
         token,
@@ -203,6 +290,8 @@ fn start_native_bridge(state: tauri::State<BridgeState>) -> Result<BridgeInfo, S
     *guard = Some(BridgeProcess {
         child,
         info: info.clone(),
+        #[cfg(windows)]
+        _job: job,
     });
     Ok(info)
 }
@@ -210,11 +299,39 @@ fn start_native_bridge(state: tauri::State<BridgeState>) -> Result<BridgeInfo, S
 #[tauri::command]
 fn stop_native_bridge(state: tauri::State<BridgeState>) -> Result<(), String> {
     let mut guard = state.0.lock().map_err(|error| error.to_string())?;
-    if let Some(mut process) = guard.take() {
-        process.child.kill().map_err(format_io_error)?;
-        process.child.wait().map_err(format_io_error)?;
+    if let Some(process) = guard.take() {
+        retire_bridge(process);
     }
     Ok(())
+}
+
+#[tauri::command]
+fn configure_native_runtime(app: tauri::AppHandle, state: tauri::State<BridgeState>, directory: String) -> Result<(), String> {
+    let source = PathBuf::from(directory);
+    let config = source.join("runtime.json");
+    let prepared = source.join("prepared.json");
+    let config_text = fs::read_to_string(config).map_err(format_io_error)?;
+    let prepared_text = fs::read_to_string(prepared).map_err(format_io_error)?;
+    let settings: serde_json::Value = serde_json::from_str(&config_text).map_err(|_| "运行环境设置无效".to_string())?;
+    let payload: serde_json::Value = serde_json::from_str(&prepared_text).map_err(|_| "游戏准备记录无效".to_string())?;
+    if settings["backend"] != "android-sdk" || !settings["sdkRoot"].is_string() || !settings["avdName"].is_string()
+        || !settings["avdHome"].is_string() || !payload["path"].is_string() || !payload["apkSha256"].is_string() {
+        return Err("请选择含运行环境设置和游戏准备记录的目录。".to_string());
+    }
+    let target = if cfg!(debug_assertions) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".local-runtime") }
+        else { app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime") };
+    let mut guard = state.0.lock().map_err(|error| error.to_string())?;
+    if let Some(process) = guard.take() { retire_bridge(process); }
+    atomic_write(&target.join("runtime.json"), config_text.as_bytes())?;
+    atomic_write(&target.join("prepared.json"), prepared_text.as_bytes())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn native_runtime_directory(app: tauri::AppHandle) -> Result<String, String> {
+    let path = if cfg!(debug_assertions) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".local-runtime") }
+        else { app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime") };
+    Ok(path.to_string_lossy().into_owned())
 }
 
 fn main() {
@@ -232,6 +349,8 @@ fn main() {
             read_native_journal,
             clear_native_journal,
             start_native_bridge,
+            configure_native_runtime,
+            native_runtime_directory,
             stop_native_bridge
         ])
         .build(tauri::generate_context!())
@@ -240,10 +359,7 @@ fn main() {
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<BridgeState>() {
                 if let Ok(mut guard) = state.0.lock() {
-                    if let Some(mut process) = guard.take() {
-                        let _ = process.child.kill();
-                        let _ = process.child.wait();
-                    }
+                    if let Some(process) = guard.take() { retire_bridge(process); }
                 }
             }
         }
@@ -272,4 +388,36 @@ fn timestamp_ms() -> u128 {
 
 fn format_io_error(error: std::io::Error) -> String {
     error.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeated_atomic_saves_replace_the_existing_file() {
+        let folder = std::env::temp_dir().join(format!("native-save-test-{}-{}", std::process::id(), timestamp_ms()));
+        let file = folder.join("project.json");
+        atomic_write(&file, b"first").unwrap();
+        atomic_write(&file, b"second confirmed version").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"second confirmed version");
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+        fs::remove_file(file).unwrap();
+        fs::remove_dir(folder).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_owned_job_terminates_its_child() {
+        use std::os::windows::process::CommandExt;
+        let ping = PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32/ping.exe");
+        let mut child = Command::new(ping).args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
+        let job = ScopedJob::own(&child).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline { thread::sleep(Duration::from_millis(20)); }
+        assert!(child.try_wait().unwrap().is_some());
+    }
 }

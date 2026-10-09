@@ -2,6 +2,23 @@
 
 本地 Tauri + React 应用。中央窗口显示 Android 客户端渲染的原生战斗画面；左侧节点以引擎 tick 为时间轴，历史节点出牌会开启新分支并保留已有子分支。
 
+## 标准卡组安装版
+
+Windows 当前用户安装程序已接入独立桥接与视频解码器，应用运行无需系统 Python 或项目源代码。Android SDK、模拟器磁盘、游戏 APK 和更新资源仍由本机运行环境提供，不随安装包分发。
+
+- 首次打开：点击“设置运行环境”，选择含 `runtime.json` 与 `prepared.json` 的已有运行环境目录。
+- 默认项目保存在用户数据目录；再次打开应用时读取上次项目与节点。草稿日志按确认动作持续保存，并检查卡牌、动作顺序和引擎身份。
+- 画面/连接异常时停止编辑并提供“恢复连接”；后台超过 5 秒收不到有效桌面请求时自动暂停。
+- 正常退出通知桥接关闭；Windows 进程组兜底清理本应用启动的引擎子进程，共享 ADB 服务在进程组外启动。
+- “导出诊断”仅包含运行版本、状态和视频统计，隐藏用户目录与会话口令。
+
+```powershell
+.\scripts\package_native_desktop.ps1
+python -m scripts.verify_desktop_bridge --steady-seconds 190
+```
+
+安装程序、使用说明和校验值输出到 `release/native-desktop/`。使用步骤见 [标准版说明](docs/native-desktop-user-guide.md)。桌面窗口鼠标交互验收仍受工具应用权限拦截，尚未记为通过；后台和安装包检查与该项分别记录。
+
 ## 当前实现
 
 - 战斗接口和探针基线：`vendor/clash-royale-battle-engine`，上游提交 `f92ccbecd6a1c9ad1fa3abaca54a51110607b6df`。本地复盘探针开放精简协议的身份校验和快照命令，使用 NDK r29 从源码重建；来源记录见 `prebuilt/replay-probe-build.json`。原版战斗规则由用户提供的 `libg.so` 执行。

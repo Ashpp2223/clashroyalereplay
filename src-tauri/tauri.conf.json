@@ -25,12 +25,14 @@
   },
   "bundle": {
     "active": true,
+    "resources": { "resources/native-bridge/": "native-bridge/" },
     "icon": [
       "icons/icon.ico"
     ],
-    "targets": "msi",
+    "targets": "nsis",
     "useLocalToolsDir": true,
     "windows": {
+      "nsis": { "installMode": "currentUser", "languages": ["SimpChinese"], "displayLanguageSelector": false },
       "wix": {
         "language": {
           "zh-CN": {

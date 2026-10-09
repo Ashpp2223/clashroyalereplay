@@ -1,4 +1,5 @@
-import type { NativeBattleAction, NativeReplayProject, NativeWorkingBranch } from "../domain/nativeReplay.ts";
+import { advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode,
+  type NativeBattleAction, type NativeReplayProject, type NativeWorkingBranch } from "../domain/nativeReplay.ts";
 
 interface NativeJournal {
   schema: "cr-native-journal.v1";
@@ -9,9 +10,16 @@ interface NativeJournal {
   actions: NativeBattleAction[];
 }
 
+const pendingWrites = new Map<string, Promise<unknown>>();
+
 async function invokeJournal<T>(command: string, args: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
+  const key = String(args.projectId);
+  const operation = (pendingWrites.get(key) ?? Promise.resolve()).catch(() => undefined)
+    .then(() => invoke<T>(command, args));
+  pendingWrites.set(key, operation);
+  try { return await operation; }
+  finally { if (pendingWrites.get(key) === operation) pendingWrites.delete(key); }
 }
 
 export async function writeNativeJournal(project: NativeReplayProject, branch: NativeWorkingBranch): Promise<void> {
@@ -36,8 +44,9 @@ export async function readNativeJournal(project: NativeReplayProject): Promise<N
       entry.workingTick < project.nodes[entry.checkedOutNodeId].finalTick || !Array.isArray(entry.actions)) {
     throw new Error("恢复日志与当前项目或引擎版本不匹配");
   }
-  return { checkedOutNodeId: entry.checkedOutNodeId, workingTick: entry.workingTick,
-    actions: entry.actions };
+  let branch = advanceNativeWork(checkoutNativeNode(project, entry.checkedOutNodeId), entry.workingTick);
+  for (const action of entry.actions) branch = appendConfirmedNativeAction(project, branch, action);
+  return branch;
 }
 
 export async function clearNativeJournal(projectId: string): Promise<void> {

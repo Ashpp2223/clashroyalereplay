@@ -1,6 +1,8 @@
 import json
 import threading
 import unittest
+import time
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -62,6 +64,62 @@ class ServerTest(unittest.TestCase):
             result = json.load(response)
         self.assertEqual(result["tick"], 100)
         self.assertEqual(engine.reset_count, 1)
+
+    def test_status_remains_available_during_serial_battle_work(self):
+        held = threading.Event()
+        release = threading.Event()
+        def hold():
+            with self.server.controller.lock:
+                held.set()
+                release.wait(3)
+        worker = threading.Thread(target=hold)
+        worker.start()
+        self.assertTrue(held.wait(1))
+        try:
+            req = Request(self.base + "/v1/status", headers={"Authorization": "Bearer " + "a" * 64})
+            with urlopen(req, timeout=1) as response:
+                self.assertEqual(response.status, 200)
+        finally:
+            release.set()
+            worker.join(2)
+
+    def test_frame_failure_pauses_the_battle(self):
+        calls = []
+        controller = self.server.controller
+        controller.playing = True
+        controller.engine = SimpleNamespace(pause=lambda: (calls.append("pause") or FakeEngine()._state(90, ())))
+        def broken_frame():
+            raise ConnectionError("decoder disconnected")
+        controller.runtime = SimpleNamespace(frame=broken_frame, apk_sha256="test", runtime_fingerprint_sha256="test", stage="ready")
+        req = Request(self.base + "/v1/frame", headers={"Authorization": "Bearer " + "a" * 64})
+        with self.assertRaises(HTTPError):
+            urlopen(req, timeout=2)
+        self.assertEqual(calls, ["pause"])
+        self.assertFalse(controller.playing)
+
+    def test_missing_contact_pauses_but_invalid_requests_do_not_renew_lease(self):
+        calls = []
+        controller = self.server.controller
+        controller.playing = True
+        controller.engine = SimpleNamespace(pause=lambda: (calls.append("pause") or FakeEngine()._state(90, ())))
+        self.server.last_contact = time.monotonic() - 10
+        with self.assertRaises(HTTPError):
+            urlopen(self.base + "/v1/status", timeout=2)
+        deadline = time.monotonic() + 2
+        while controller.playing and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertFalse(controller.playing)
+        self.assertEqual(calls, ["pause"])
+
+    def test_diagnostics_omit_token_and_private_home(self):
+        from pathlib import Path
+        self.server.controller.last_error = "Missing " + str(Path.home()) + "/private/runtime.json"
+        req = Request(self.base + "/v1/diagnostics", headers={"Authorization": "Bearer " + "a" * 64})
+        with urlopen(req, timeout=2) as response:
+            data = response.read().decode()
+        self.assertNotIn("a" * 64, data)
+        self.assertNotIn(str(Path.home()), data)
+        self.assertNotIn("token", data)
 
 
 if __name__ == "__main__":

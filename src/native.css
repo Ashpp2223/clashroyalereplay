@@ -20,6 +20,7 @@ button:disabled { cursor: not-allowed; opacity: .43; }
 .panel-heading { display: flex; justify-content: space-between; font-size: 12px; font-weight: 700; color: #c8d3e0; letter-spacing: .05em; padding: 0 7px 12px; border-bottom: 1px solid #2a3a4d; }
 .panel-heading span:last-child { color: #8fa4ba; font-weight: 400; }
 .native-project-title { color: #f2c679; font-size: 13px; margin: 17px 8px 12px; overflow: hidden; text-overflow: ellipsis; }
+.native-project-title input { width: 100%; background: transparent; color: inherit; border: 1px solid #33465d; border-radius: 5px; padding: 7px; }
 .native-tree { min-height: 120px; overflow-x: auto; }
 .tree-node { width: 100%; border: 0; border-radius: 6px; background: transparent; color: #dbe5f1; text-align: left; padding: 8px 6px; display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
 .tree-node:hover { background: #203147; }
@@ -37,7 +38,7 @@ button:disabled { cursor: not-allowed; opacity: .43; }
 .battle-elixir { display: flex; gap: 8px; font-size: 12px; color: #ccb8de; white-space: nowrap; }
 .battle-elixir span { color: #60758d; }
 .battle-stage { flex: 1; min-height: 0; overflow: auto; display: grid; place-items: center; padding: 8px; }
-.native-surface { width: min(100%, 460px, 29vh); position: relative; border: 2px solid #41556a; border-radius: 8px; overflow: hidden; box-shadow: 0 16px 50px #0008; background: #101b27; }
+.native-surface { width: min(100%, 460px, max(170px, calc(52vh - 135px))); position: relative; border: 2px solid #41556a; border-radius: 8px; overflow: hidden; box-shadow: 0 16px 50px #0008; background: #101b27; }
 .native-surface-label { height: 18px; padding: 3px 9px; background: #17263a; color: #d4e0eb; font-size: 10px; letter-spacing: .04em; }
 .native-crop { width: 100%; overflow: hidden; line-height: 0; }
 .native-crop canvas { display: block; width: 100%; height: auto; cursor: crosshair; }
@@ -59,4 +60,6 @@ button:disabled { cursor: not-allowed; opacity: .43; }
 .runtime-card strong { color: #dbe6f0; }
 .runtime-card p { color: #f0b3ab; line-height: 1.4; margin: 0; }
 .runtime-card small { color: #657c94; }
+.native-recovery { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 10px; background: #472b26; color: #ffe0b0; font-size: 12px; }
+.native-recovery button { border: 1px solid #d8ac65; color: #142032; background: #e8b665; border-radius: 6px; padding: 7px 12px; }
 @media (max-width: 840px) { .native-workspace { grid-template-columns: 190px minmax(420px, 1fr); } .native-inspector { display: none; } }
