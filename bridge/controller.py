@@ -78,6 +78,7 @@ class BattleController:
                 return self.status()
         if self.runtime is None:
             raise RuntimeError("无 Android 运行时")
+        self.last_error = None
         try:
             attestation = self.runtime.start()
             with self.lock:

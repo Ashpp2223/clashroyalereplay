@@ -6,7 +6,7 @@ parser.add_argument('--steady-seconds',type=int,default=0)
 args=parser.parse_args()
 root=Path(__file__).resolve().parents[1]; token=secrets.token_hex(32)
 exe=Path(os.environ.get('CR_FROZEN_BRIDGE',str(root/'src-tauri/resources/native-bridge/native-bridge.exe')))
-p=subprocess.Popen([str(exe),'--parent-stdin'],cwd=str(root/'.local-runtime'),env={**os.environ,'CR_RUNTIME_HOME':str(root/'.local-runtime'),'CR_BRIDGE_TOKEN':token},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
+p=subprocess.Popen([str(exe),'--parent-stdin'],cwd=str(root/'.local-runtime'),env={**os.environ,'CR_RUNTIME_HOME':os.environ.get('CR_CHECK_RUNTIME_HOME',str(root/'.local-runtime')),'CR_BRIDGE_TOKEN':token},stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=subprocess.CREATE_NO_WINDOW)
 r={'status':'running','checks':[]}
 try:
     hello=json.loads(p.stdout.readline()); base='http://127.0.0.1:'+str(hello['port'])
@@ -49,7 +49,7 @@ try:
             raise AssertionError('Continuous video did not become ready; screenshot fallback alone is insufficient')
         if args.steady_seconds>=180 and r['steady']['video']['sessionsStarted']<2:
             raise AssertionError('Screenrecord restart was not observed')
-        r['checks'].extend(['video-continuity-over-screenrecord-restart','repeated-live-snapshot-restoration'])
+        r['checks'].extend(['video-continuity-over-screenrecord-restart' if args.steady_seconds>=180 else 'continuous-native-video','repeated-live-snapshot-restoration'])
     r['status']='passed'
 except Exception as ex:r.update(status='failed',error=str(ex))
 finally:

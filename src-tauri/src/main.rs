@@ -162,6 +162,25 @@ fn atomic_write(file_path: &Path, data: &[u8]) -> Result<(), String> {
     })
 }
 
+fn seed_existing_runtime(source: &Path, target: &Path) -> Result<bool, String> {
+    // Only discover a complete, existing local environment on first use.
+    // A user's explicitly selected configuration is never replaced here.
+    if target.join("runtime.json").exists() || target.join("prepared.json").exists() { return Ok(false); }
+    let settings_text = match fs::read_to_string(source.join("runtime.json")) { Ok(text) => text, Err(_) => return Ok(false) };
+    let payload_text = match fs::read_to_string(source.join("prepared.json")) { Ok(text) => text, Err(_) => return Ok(false) };
+    let settings: serde_json::Value = match serde_json::from_str(settings_text.trim_start_matches('\u{feff}')) { Ok(value) => value, Err(_) => return Ok(false) };
+    let payload: serde_json::Value = match serde_json::from_str(payload_text.trim_start_matches('\u{feff}')) { Ok(value) => value, Err(_) => return Ok(false) };
+    let (sdk, avd_home, avd_name, apk) = match (settings["sdkRoot"].as_str(), settings["avdHome"].as_str(), settings["avdName"].as_str(), payload["path"].as_str()) {
+        (Some(sdk), Some(home), Some(name), Some(apk)) => (sdk, home, name, apk), _ => return Ok(false),
+    };
+    if settings["backend"] != "android-sdk" || !avd_name.chars().all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
+        || !Path::new(sdk).join("emulator/emulator.exe").is_file()
+        || !Path::new(avd_home).join(format!("{avd_name}.ini")).is_file() || !Path::new(apk).is_file() { return Ok(false); }
+    atomic_write(&target.join("runtime.json"), settings_text.as_bytes())?;
+    atomic_write(&target.join("prepared.json"), payload_text.as_bytes())?;
+    Ok(true)
+}
+
 fn journal_path(app: &tauri::AppHandle, project_id: &str) -> Result<PathBuf, String> {
     if project_id.len() > 64
         || project_id.is_empty()
@@ -222,10 +241,11 @@ async fn start_native_bridge(app: tauri::AppHandle, state: tauri::State<'_, Brid
         app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime")
     };
     fs::create_dir_all(&runtime_home).map_err(format_io_error)?;
+    seed_existing_runtime(&root.join(".local-runtime"), &runtime_home)?;
     // ADB is a shared host service. Start it outside the owned bridge job so
     // retiring this application cannot terminate other emulator connections.
     let settings = fs::read_to_string(runtime_home.join("runtime.json")).ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')).ok());
     let default_sdk = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Android/Sdk");
     let sdk = settings.as_ref().and_then(|value| value["sdkRoot"].as_str()).map(PathBuf::from).unwrap_or(default_sdk);
     let adb = sdk.join("platform-tools/adb.exe");
@@ -312,8 +332,8 @@ fn configure_native_runtime(app: tauri::AppHandle, state: tauri::State<BridgeSta
     let prepared = source.join("prepared.json");
     let config_text = fs::read_to_string(config).map_err(format_io_error)?;
     let prepared_text = fs::read_to_string(prepared).map_err(format_io_error)?;
-    let settings: serde_json::Value = serde_json::from_str(&config_text).map_err(|_| "运行环境设置无效".to_string())?;
-    let payload: serde_json::Value = serde_json::from_str(&prepared_text).map_err(|_| "游戏准备记录无效".to_string())?;
+    let settings: serde_json::Value = serde_json::from_str(config_text.trim_start_matches('\u{feff}')).map_err(|_| "运行环境设置无效".to_string())?;
+    let payload: serde_json::Value = serde_json::from_str(prepared_text.trim_start_matches('\u{feff}')).map_err(|_| "游戏准备记录无效".to_string())?;
     if settings["backend"] != "android-sdk" || !settings["sdkRoot"].is_string() || !settings["avdName"].is_string()
         || !settings["avdHome"].is_string() || !payload["path"].is_string() || !payload["apkSha256"].is_string() {
         return Err("请选择含运行环境设置和游戏准备记录的目录。".to_string());
@@ -393,6 +413,31 @@ fn format_io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_run_discovers_complete_bom_configuration_without_overwriting_user_settings() {
+        let folder = std::env::temp_dir().join(format!("native-environment-test-{}-{}", std::process::id(), timestamp_ms()));
+        let source = folder.join("source");
+        let target = folder.join("user-runtime");
+        let sdk = folder.join("sdk");
+        let avd = folder.join("avd");
+        fs::create_dir_all(sdk.join("emulator")).unwrap();
+        fs::create_dir_all(&avd).unwrap();
+        fs::write(sdk.join("emulator/emulator.exe"), b"fixture").unwrap();
+        fs::write(avd.join("CR_Dev_API31.ini"), b"fixture").unwrap();
+        let apk = folder.join("prepared.apk");
+        fs::write(&apk, b"fixture").unwrap();
+        let config = serde_json::json!({"backend":"android-sdk", "sdkRoot":sdk, "avdHome":avd, "avdName":"CR_Dev_API31"});
+        let payload = serde_json::json!({"path":apk, "apkSha256":"fixture"});
+        atomic_write(&source.join("runtime.json"), format!("\u{feff}{config}").as_bytes()).unwrap();
+        atomic_write(&source.join("prepared.json"), payload.to_string().as_bytes()).unwrap();
+        assert!(seed_existing_runtime(&source, &target).unwrap());
+        assert!(target.join("prepared.json").is_file());
+        atomic_write(&target.join("runtime.json"), b"user-selected settings").unwrap();
+        assert!(!seed_existing_runtime(&source, &target).unwrap());
+        assert_eq!(fs::read(target.join("runtime.json")).unwrap(), b"user-selected settings");
+        fs::remove_dir_all(folder).unwrap();
+    }
 
     #[test]
     fn repeated_atomic_saves_replace_the_existing_file() {

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from .controller import BattleController
 from .runtime import AndroidRuntime
+from .setup import SetupManager
 
 
 ALLOWED_ORIGINS = {"http://127.0.0.1:1420", "http://localhost:1420", "tauri://localhost",
@@ -28,6 +29,7 @@ class BridgeServer(ThreadingHTTPServer):
     def __init__(self, port: int, token: str, controller: BattleController):
         self.token = token
         self.controller = controller
+        self.setup = SetupManager()
         self.start_thread: threading.Thread | None = None
         self.last_contact = time.monotonic()
         self._stopped = threading.Event()
@@ -90,7 +92,11 @@ class BridgeRequest(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == "/v1/status":
-                self._send(200, self.server.controller.status())
+                status = self.server.controller.status()
+                status["setup"] = self.server.setup.status.copy()
+                status["environmentConfigured"] = (RUNTIME_HOME / "runtime.json").is_file()
+                status["resourcesConfigured"] = (RUNTIME_HOME / "prepared.json").is_file()
+                self._send(200, status)
             elif path == "/v1/diagnostics":
                 status = self.server.controller.status()
                 error = str(status.get("error") or "")
@@ -131,10 +137,23 @@ class BridgeRequest(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             controller = self.server.controller
             if path == "/v1/start":
+                if self.server.setup.status["state"] in ("installing", "importing"):
+                    raise ValueError("请等待运行环境准备完成")
                 if not self.server.start_thread or not self.server.start_thread.is_alive():
                     self.server.start_thread = threading.Thread(target=self._start_runtime, daemon=True)
                     self.server.start_thread.start()
                 result = controller.status()
+            elif path == "/v1/setup/install":
+                directory = body.get("directory")
+                if directory is not None and not isinstance(directory, str):
+                    raise ValueError("安装目录无效")
+                result = self.server.setup.start(body.get("acceptLicense"), directory)
+            elif path == "/v1/setup/resources":
+                if self.server.start_thread and self.server.start_thread.is_alive():
+                    raise ValueError("请等待当前连接完成")
+                if not isinstance(body.get("path"), str):
+                    raise ValueError("请选择战斗资源包")
+                result = self.server.setup.import_resources(body["path"], controller)
             elif path == "/v1/reset":
                 result = controller.reset(body.get("seed", 1))
             elif path == "/v1/pause":

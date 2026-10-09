@@ -21,6 +21,9 @@ export interface BridgeStatus {
   identity: EngineIdentity;
   cropProfile: CropProfile;
   capabilities: Record<string, boolean> | null;
+  environmentConfigured?: boolean;
+  resourcesConfigured?: boolean;
+  setup?: { state: string; stage: string; downloaded: number; total: number; error: string | null };
 }
 
 export interface NativeObservation {

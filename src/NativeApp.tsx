@@ -32,6 +32,8 @@ export default function NativeApp() {
   const [notice, setNotice] = useState("准备启动原生战斗环境");
   const [busy, setBusy] = useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [acceptSdkTerms, setAcceptSdkTerms] = useState(false);
+  const [installDirectory, setInstallDirectory] = useState<string | null>(null);
   const initialized = useRef(false);
   const busyRef = useRef(false);
   const projectRef = useRef(project);
@@ -160,7 +162,12 @@ export default function NativeApp() {
       } catch (error) { setNotice(`上次项目无法读取，请重新打开：${String(error)}`); }
       bridgeRef.current = client;
       setBridge(client);
-      void client.post<BridgeStatus>("/v1/start").then(setStatus).catch((error) => setNotice(String(error)));
+      void client.get<BridgeStatus>("/v1/status").then(async (latest) => {
+        setStatus(latest);
+        if (latest.environmentConfigured && latest.resourcesConfigured) {
+          setStatus(await client.post<BridgeStatus>("/v1/start"));
+        }
+      }).catch((error) => setNotice(String(error)));
     }).catch((error) => { setNotice(String(error)); interrupt("战斗服务未启动，请设置运行环境后重试"); });
     return () => { alive = false; };
   }, []);
@@ -303,6 +310,34 @@ export default function NativeApp() {
         schema: "cr-native-diagnostics.v1", ready: false, error: connectionErrorRef.current ?? "战斗服务未连接"
       }, null, 2) });
       setNotice("诊断记录已保存，未包含会话口令或项目内容");
+    });
+  }
+
+  async function installEnvironment(): Promise<void> {
+    if (!bridgeRef.current) return;
+    await exclusive(async () => {
+      await bridgeRef.current!.post("/v1/setup/install", { acceptLicense: acceptSdkTerms, directory: installDirectory });
+      setNotice("正在准备安卓运行环境，可以在页面查看进度");
+    });
+  }
+
+  async function chooseInstallDirectory(): Promise<void> {
+    await exclusive(async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const directory = await open({ directory: true, multiple: false, title: "选择安卓环境安装目录（建议英文路径）" });
+      if (typeof directory === "string") setInstallDirectory(directory);
+    });
+  }
+
+  async function importResources(): Promise<void> {
+    if (!bridgeRef.current) return;
+    await exclusive(async () => {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const path = await open({ title: "选择本地战斗资源包", multiple: false,
+        filters: [{ name: "战斗资源包", extensions: ["zip"] }] });
+      if (!path || Array.isArray(path)) return;
+      await bridgeRef.current!.post("/v1/setup/resources", { path });
+      setNotice("正在校验并导入战斗资源");
     });
   }
 
@@ -598,6 +633,7 @@ export default function NativeApp() {
   const ownElixir = observation?.players.find((player) => player.owner === 1)?.elixir;
   const enemyElixir = observation?.players.find((player) => player.owner === 0)?.elixir;
   const ready = Boolean(status?.ready && observation && !connectionError);
+  const settingUp = status?.setup?.state === "installing" || status?.setup?.state === "importing";
 
   return <div className="native-app">
     <header className="native-header">
@@ -633,8 +669,33 @@ export default function NativeApp() {
             我 {ownElixir === undefined ? "—" : (ownElixir / 10000).toFixed(1)}
           </div>
         </div>
-        <div className="battle-stage"><NativeSurface bridge={bridge} ready={ready} profile={profile}
-          selected={selected} onHudClick={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} /></div>
+        <div className="battle-stage">{!observation ? <section className="first-run-panel">
+          <div className="first-run-symbol">♛</div>
+          <h2>{status?.environmentConfigured && status?.resourcesConfigured ? "连接战斗环境" : "首次使用 · 准备战斗环境"}</h2>
+          <p>画面与战斗规则由原生游戏提供。没有模拟器的电脑，可在这里安装所需的最小安卓环境。</p>
+          <div className="setup-step"><strong>1 · 安卓运行环境</strong>
+            <span>{status?.environmentConfigured ? "已有环境已识别" : "首次下载约 1.9 GB，需要至少 16 GB 可用空间"}</span>
+            {!status?.environmentConfigured && <>
+              <label className="sdk-terms"><input type="checkbox" checked={acceptSdkTerms} onChange={(event) => setAcceptSdkTerms(event.target.checked)} />
+                <span>我已阅读并接受 <a href="https://developer.android.com/studio/terms" target="_blank" rel="noreferrer">Android SDK 使用条款</a></span></label>
+              <button className="setup-primary" onClick={() => { void installEnvironment(); }} disabled={!acceptSdkTerms || busy || settingUp}>安装安卓运行环境</button>
+              <button onClick={() => { void chooseInstallDirectory(); }} disabled={busy || settingUp}>更改安装位置</button>
+              <span>{installDirectory ?? "默认安装在当前用户的数据目录"}</span>
+            </>}
+          </div>
+          <div className="setup-step"><strong>2 · 本地战斗资源</strong>
+            <span>{status?.resourcesConfigured ? "战斗资源已连接" : "选择复盘器战斗资源包；游戏文件不会随安装程序分发"}</span>
+            {!status?.resourcesConfigured && <button onClick={() => { void importResources(); }} disabled={!status?.environmentConfigured || settingUp || busy}>导入战斗资源包</button>}
+          </div>
+          {settingUp && <div className="setup-progress"><span>{status?.setup?.stage}</span>
+            {status?.setup?.state === "installing" && <progress max={status.setup.total} value={status.setup.downloaded} />}
+          </div>}
+          {status?.setup?.error && <p className="setup-error">{status.setup.error}</p>}
+          <div className="setup-actions"><button onClick={() => { void configureRuntime(); }} disabled={busy || settingUp}>选择已有运行环境</button>
+            <button className="setup-primary" onClick={() => { void reconnect(); }} disabled={busy || settingUp || !status?.environmentConfigured || !status?.resourcesConfigured}>开始连接</button></div>
+          <small>若电脑未启用虚拟化，安装向导会给出具体检查结果。</small>
+        </section> : <NativeSurface bridge={bridge} ready={ready} profile={profile}
+          selected={selected} onHudClick={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
         {connectionError && <div className="native-recovery" role="alert">
           <span>{connectionError}</span><button onClick={() => { void reconnect(); }} disabled={busy}>恢复连接</button>
         </div>}
@@ -665,10 +726,10 @@ export default function NativeApp() {
             onChange={(event) => editNode({ note: event.target.value })} placeholder="记录这一条时间线的判断…" /></label>
           <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode.parentId || busy}>删除此分支及后代</button>
         </> : <p className="inspector-empty">战斗就绪后会显示节点信息。</p>}
-        <div className="runtime-card"><strong>运行时</strong>
+        <div className="runtime-card"><strong>战斗连接</strong>
           <span>{status?.stage ?? "未连接"}</span>
           {status?.error && <p>{status.error}</p>}
-          <small>引擎 {status?.identity.upstreamCommit.slice(0, 8) ?? "—"}</small>
+          <small>标准卡组 · 原生战斗</small>
         </div>
       </aside>
     </div>

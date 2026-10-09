@@ -27,6 +27,15 @@ python -m scripts.verify_desktop_bridge --steady-seconds 190
 - v2 文件：`.cr-native-replay.json`。旧 `.cr-replay.json` v1 文件不转换。
 - 创建节点时先取得进程内原生状态快照；时间拖动优先从当前路线最近的快照续跑。快照句柄只在本次游戏进程中有效，不写入项目文件；重启后由动作日志重放并核对状态摘要。
 - 未提交动作写入本机 journal；选择已保存项目时可恢复。
+- 安装版首次使用向导：没有模拟器时，从 Google 官方源下载固定的最小 SDK 组件与 API 31 镜像（约 1.9 GB），核验归档、检测虚拟化、创建专用虚拟设备，再导入本地战斗资源包。无需 Android Studio。默认用户目录不可用于安卓组件时可更改安装位置；至少预留 16 GB。完整空环境战斗验证仍待通过，不能将组件安装通过当成战斗验收通过。
+- 老版浅色蓝白界面、紧凑三栏与随可用高度缩放的原生画面。首次安装识别本机已有完整环境；环境选择支持带 UTF-8 BOM 的配置文件。
+
+本地战斗资源包由用户已有的匹配游戏包与更新资源生成，不含账号或存档，也不随仓库或公开安装包分发：
+
+```powershell
+$prepared = (Get-Content .local-runtime\prepared.json -Raw | ConvertFrom-Json).path
+python -m scripts.export_native_resources --apk $prepared --export .local-runtime/android-data --output .local-runtime/standard-battle-resources.zip
+```
 
 ## 开发运行
 

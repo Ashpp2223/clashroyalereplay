@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent } from "react";
 import type { CropProfile } from "./bridge.ts";
 import { NativeBridge } from "./bridge.ts";
 import { eventToNativePixel, type CropRect } from "./geometry.ts";
@@ -27,7 +27,7 @@ function CroppedFrame({ image, profile, crop, label, onClick, selected }: {
     if (!canvas) return;
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
-    context.fillStyle = "#101b27";
+    context.fillStyle = "#e9f0f6";
     context.fillRect(0, 0, crop[2], crop[3]);
     if (!image || !image.width) return;
     const scale = image.width / profile.nativeWidth;
@@ -50,6 +50,20 @@ function CroppedFrame({ image, profile, crop, label, onClick, selected }: {
 export default function NativeSurface({ bridge, ready, profile, selected, onHudClick, onArenaClick, onUnavailable }: NativeSurfaceProps) {
   const [image, setImage] = useState<ImageBitmap | null>(null);
   const [frameError, setFrameError] = useState<string | null>(null);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [surfaceWidth, setSurfaceWidth] = useState(250);
+  useEffect(() => {
+    const parent = surfaceRef.current?.parentElement;
+    if (!parent) return;
+    const resize = () => {
+      const aspect = profile.enemyHud[3] / profile.enemyHud[2] + profile.arena[3] / profile.arena[2] + profile.myHud[3] / profile.myHud[2];
+      setSurfaceWidth(Math.max(100, Math.min(460, parent.clientWidth - 24, (parent.clientHeight - 50) / aspect)));
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(parent);
+    resize();
+    return () => observer.disconnect();
+  }, [profile]);
   useEffect(() => () => image?.close(), [image]);
   useEffect(() => {
     if (!bridge || !ready) { setImage(null); return; }
@@ -77,7 +91,7 @@ export default function NativeSurface({ bridge, ready, profile, selected, onHudC
     };
   }, [bridge, ready, onUnavailable]);
 
-  return <div className="native-surface">
+  return <div className="native-surface" ref={surfaceRef} style={{ "--surface-width": `${surfaceWidth}px` } as CSSProperties}>
     <div className="native-surface-label">敌方 · 原生手牌与圣水</div>
     <CroppedFrame image={image} profile={profile} crop={profile.enemyHud} label="敌方原生手牌与圣水"
       selected={selected?.owner === 0} onClick={(pixel) => onHudClick(0, pixel)} />
@@ -86,7 +100,7 @@ export default function NativeSurface({ bridge, ready, profile, selected, onHudC
     <div className="native-surface-label">我方 · 原生手牌与圣水</div>
     <CroppedFrame image={image} profile={profile} crop={profile.myHud} label="我方原生手牌与圣水"
       selected={selected?.owner === 1} onClick={(pixel) => onHudClick(1, pixel)} />
-    {!ready && <div className="native-surface-message">正在等待原生战斗画面…</div>}
+    {!ready && <div className="native-surface-message"><strong>战斗尚未就绪</strong><span>连接完成后将在这里显示游戏画面</span></div>}
     {frameError && <div className="native-surface-error">画面暂不可用：{frameError}</div>}
   </div>;
 }

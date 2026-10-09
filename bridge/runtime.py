@@ -135,7 +135,7 @@ class AndroidRuntime:
             raise RuntimeError("开发模拟器端口必须为 5554～5682 的偶数")
         avd_home = Path(self.config.get("avdHome", str(RUNTIME_HOME / "avd")))
         if not (avd_home / (self.avd_name + ".ini")).is_file():
-            raise RuntimeError("开发虚拟设备未准备；请运行 scripts/prepare_dev_emulator.ps1")
+            raise RuntimeError("尚未连接战斗运行环境，请点击“设置运行环境”选择已有环境目录")
         self.stage = "启动 Android 开发环境"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log = RUNTIME_HOME / "dev-emulator.log"
