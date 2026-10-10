@@ -1,7 +1,7 @@
 import nativeCards from "../data/nativeCards.json" with { type: "json" };
 export interface NativeCardDefinition {
   id:number;name:string;engineName:string;cost:number;kind:string;image:string|null;
-  forms:number;evolutionImage:string|null;heroImage:string|null;abilityNames:string[];
+  forms:number;evolutionImage:string|null;heroImage:string|null;abilityNames:string[];omitFromStartingHand:boolean;
 }
 export const NATIVE_CARD_CATALOG:readonly NativeCardDefinition[] = nativeCards;
 const SUPPORTED_CARD_IDS = new Set(nativeCards.map(card => card.id));
@@ -23,13 +23,14 @@ export interface EngineIdentity {
 }
 
 export interface NativeMatchConfig {
-  seed: number;
-  deck0: number[];
-  deck1: number[];
-  preset: "standard" | "custom";
-  forms0?: number[];
-  forms1?: number[];
-  level?: number;
+  readonly seed: number;
+  readonly deck0: readonly number[];
+  readonly deck1: readonly number[];
+  readonly preset: "standard" | "custom";
+  readonly forms0?: readonly number[];
+  readonly forms1?: readonly number[];
+  readonly level?: number;
+  readonly dealMode?: 'ordered';
 }
 
 export interface NativeBattleAction {
@@ -67,7 +68,7 @@ export interface NativeReplayProject {
   createdAt: string;
   updatedAt: string;
   engine: EngineIdentity;
-  match: NativeMatchConfig;
+  readonly match: NativeMatchConfig;
   rootNodeId: string;
   nodes: Record<string, NativeTimelineNode>;
   layout: Record<string, { x: number; y: number }>;
@@ -79,17 +80,31 @@ export interface NativeWorkingBranch {
   actions: NativeBattleAction[];
 }
 
-export function validateNativeDeck(deck: number[]): void {
+export function validateNativeDeck(deck: readonly number[]): void {
   if (!Array.isArray(deck) || deck.length !== 8 || new Set(deck).size !== 8 ||
       deck.some(card => !Number.isSafeInteger(card) || !SUPPORTED_CARD_IDS.has(card))) {
     throw new Error("每方需要八张不同的受支持普通卡牌");
   }
 }
 
-export function validateNativeForms(deck:number[], forms:number[] = Array(8).fill(0)):void {
+export function validateNativeForms(deck:readonly number[], forms:readonly number[] = Array(8).fill(0)):void {
   if (!Array.isArray(forms) || forms.length !== 8 || forms.some((mode,index) =>
       !Number.isSafeInteger(mode) || ![0,1,2].includes(mode) || (mode !== 0 && !(NATIVE_CARD_CATALOG.find(card=>card.id===deck[index])!.forms & mode)))) throw new Error('卡牌形态不受当前引擎支持');
   if (forms.filter(mode=>mode===1).length>2 || forms.filter(mode=>mode===2).length>2 || forms.filter(Boolean).length>3) throw new Error('每方最多两张觉醒、两张精英，特殊形态合计最多三张');
+}
+
+export function validateNativeDeal(deck:readonly number[]):void {
+  validateNativeDeck(deck);
+  const omitted=(id:number)=>Boolean(NATIVE_CARD_CATALOG.find(card=>card.id===id)?.omitFromStartingHand);
+  const count=deck.filter(omitted).length;
+  const positions=deck.map((id,index)=>omitted(id)?index:-1).filter(index=>index>=0);
+  const expected=count===0?[]:count===1?[7]:[5,7];
+  if(JSON.stringify(positions)!==JSON.stringify(expected))throw new Error('原生牌序规则：单张镜像或采集器在第 8 位；同时携带时在第 6、8 位');
+}
+
+function lockNativeMatch(match:NativeMatchConfig):NativeMatchConfig {
+  return Object.freeze({...match,deck0:Object.freeze([...match.deck0]),deck1:Object.freeze([...match.deck1]),
+    ...(match.forms0?{forms0:Object.freeze([...match.forms0])}:{}),...(match.forms1?{forms1:Object.freeze([...match.forms1])}:{})});
 }
 
 export function projectForCurrentEngine(project:NativeReplayProject, identity:EngineIdentity): {project:NativeReplayProject; upgraded:boolean} {
@@ -116,7 +131,7 @@ export function createNativeProject(
     createdAt: now,
     updatedAt: now,
     engine: { ...engine },
-    match: { ...match, deck0: [...match.deck0], deck1: [...match.deck1] },
+    match: lockNativeMatch(match),
     rootNodeId: rootId,
     nodes: {
       [rootId]: {
@@ -332,6 +347,8 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
   validateNativeForms(project.match.deck0,project.match.forms0);
   validateNativeForms(project.match.deck1,project.match.forms1);
   if(project.match.level!==undefined && (!Number.isSafeInteger(project.match.level) || project.match.level<1 || project.match.level>16))throw new Error('战斗等级必须为 1～16 级');
+  if(project.match.dealMode!==undefined && project.match.dealMode!=='ordered')throw new Error('初始牌序模式无效');
+  if(project.match.dealMode==='ordered') [project.match.deck0,project.match.deck1].forEach(validateNativeDeal);
   if (!['standard', 'custom'].includes(project.match.preset)) throw new Error("卡组配置格式无效");
   if (project.match.preset === 'standard' && [project.match.deck0, project.match.deck1].some(deck =>
       JSON.stringify(deck) !== JSON.stringify(STANDARD_NATIVE_DECK))) throw new Error("标准卡组配置与预设不一致");
@@ -377,7 +394,7 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
   };
   visit(project.rootNodeId);
   if (visited.size !== entries.length) throw new Error("项目中存在孤立节点");
-  return project;
+  return {...project,match:lockNativeMatch(project.match)};
 }
 
 export function formatNativeTick(tick: number): string {

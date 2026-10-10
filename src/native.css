@@ -143,3 +143,14 @@ input,textarea,select { border:1px solid #cbd5df; border-radius:7px; background:
 .native-hand-cards strong { max-width:100%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:10px; }
 .native-hand-cards small { font-size:9px; color:#8665a1; }
 .hand-card-number { position:absolute; top:1px; left:3px; font-size:9px; color:#7190a8; }
+.new-archive-title { display:grid; gap:6px; color:#526d8e; font-size:12px; }
+.new-archive-title input { width:100%; }
+.deck-order-heading { padding:8px 0; color:#526d8e; font-size:12px; }
+.initial-card { position:relative; display:flex; flex-direction:column; align-items:center; gap:5px; padding:8px 4px; }
+.initial-card img { width:48px; height:55px; object-fit:contain; }
+.initial-card strong { font-size:11px; }
+.initial-card small { font-size:10px; color:#7d6b99; }
+.initial-card>span { position:absolute; top:3px; left:5px; color:#6784a0; font-size:10px; }
+.initial-order-tools { display:flex; justify-content:center; border-top:1px solid #dce6ef; }
+.initial-order-tools button { border:0; border-radius:0; padding:5px; font-size:12px; }
+.initial-form { text-align:center; border-top:1px solid #dce6ef; padding:5px; color:#526d8e; font-size:11px; }

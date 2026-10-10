@@ -9,7 +9,7 @@ from typing import Any
 
 from .engine_adapter import new_engine, new_play
 from .runtime import AndroidRuntime, MANIFEST, PROBE_SHA256, UPSTREAM_COMMIT
-from .match_config import validate_decks, validate_forms, validate_level, STANDARD_DECK
+from .match_config import validate_decks, validate_forms, validate_level, validate_deal_mode, ordered_deal, remap_deal, STANDARD_DECK
 
 
 def observation(state: Any) -> dict:
@@ -51,6 +51,7 @@ class BattleController:
         self.decks = (STANDARD_DECK, STANDARD_DECK)
         self.forms = ((0,)*8,(0,)*8)
         self.level = None
+        self.deal_mode = None
         self.attestation: dict | None = None
         self.last_error: str | None = None
 
@@ -119,20 +120,32 @@ class BattleController:
             self.last_error = reason
             return {"playing": False, "error": reason}
 
-    def reset(self, seed: int, deck0=None, deck1=None, forms0=None, forms1=None, level=None) -> dict:
+    def reset(self, seed: int, deck0=None, deck1=None, forms0=None, forms1=None, level=None, deal_mode=None) -> dict:
         with self.lock:
             if not isinstance(seed, int) or seed < 0 or seed > 2**31 - 1:
                 raise ValueError("随机种子无效")
             decks = validate_decks(deck0, deck1)
             forms = validate_forms(decks,forms0,forms1)
             level = validate_level(level)
+            deal_mode = validate_deal_mode(decks,deal_mode)
             engine = self._engine()
-            state = (engine.reset(seed=seed) if decks == (STANDARD_DECK, STANDARD_DECK) and not any(any(side) for side in forms) and level is None
-                     else engine.reset(seed=seed, deck0=list(decks[0]), deck1=list(decks[1]), forms0=list(forms[0]), forms1=list(forms[1]), level=level))
+            configured_decks,configured_forms=decks,forms
+            seen=set()
+            for attempt in range(8 if deal_mode else 1):
+                if configured_decks in seen:
+                    raise RuntimeError('原生引擎无法采用这个初始牌序，请调整待抽顺序')
+                seen.add(configured_decks)
+                state = (engine.reset(seed=seed) if configured_decks == (STANDARD_DECK, STANDARD_DECK) and not any(any(side) for side in configured_forms) and level is None
+                         else engine.reset(seed=seed, deck0=list(configured_decks[0]), deck1=list(configured_decks[1]), forms0=list(configured_forms[0]), forms1=list(configured_forms[1]), level=level))
+                if deal_mode is None or ordered_deal(state)==decks:break
+                configured_decks,configured_forms=remap_deal(configured_decks,configured_forms,ordered_deal(state),decks)
+            else:
+                raise RuntimeError('初始牌序未通过原生引擎校验，请调整待抽顺序')
             self.seed = seed
             self.decks = decks
             self.forms = forms
             self.level = level
+            self.deal_mode = deal_mode
             self.playing = False
             return observation(state)
 
@@ -284,16 +297,17 @@ class BattleController:
 
     def replay(self, seed: int, actions: list[dict], target_tick: int, expected_digest: str | None = None,
                snapshot_handle: int | None = None, base_tick: int | None = None,
-               base_digest: str | None = None, deck0=None, deck1=None, forms0=None, forms1=None, level=None) -> dict:
+               base_digest: str | None = None, deck0=None, deck1=None, forms0=None, forms1=None, level=None, deal_mode=None) -> dict:
         """Replay an event suffix from a live snapshot, or the full path from the seed."""
         with self.lock:
             decks = validate_decks(deck0, deck1)
             forms = validate_forms(decks,forms0,forms1)
             level = validate_level(level)
+            deal_mode = validate_deal_mode(decks,deal_mode)
             if snapshot_handle is None:
-                state = self.reset(seed, list(decks[0]), list(decks[1]),list(forms[0]),list(forms[1]),level)
+                state = self.reset(seed, list(decks[0]), list(decks[1]),list(forms[0]),list(forms[1]),level,deal_mode)
             else:
-                if self.seed != seed or self.decks != decks or self.forms != forms or self.level != level or not isinstance(base_tick, int) or not base_digest:
+                if self.seed != seed or self.decks != decks or self.forms != forms or self.level != level or self.deal_mode != deal_mode or not isinstance(base_tick, int) or not base_digest:
                     raise ValueError("快照基点无效")
                 state = self.snapshot_restore(snapshot_handle)
                 if state["tick"] != base_tick or state["digest"] != base_digest:

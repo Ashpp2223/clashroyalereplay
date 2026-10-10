@@ -124,3 +124,13 @@ test('level-16 matches retain their level while legacy archives retain the old t
   assert.equal(validateNativeProject(JSON.parse(JSON.stringify(current))).match.level,16);
   for(const level of [0,17,true,16.5])assert.throws(()=>validateNativeProject({...current,match:{...current.match,level}}));
 });
+
+test('initial configuration is frozen at creation and after reading an archive',()=>{
+  const project=createNativeProject(identity,{...match,level:16,dealMode:'ordered'},90,'root');
+  assert.throws(()=>{project.match.deck0.reverse();},TypeError);
+  assert.throws(()=>{project.match.level=11;},TypeError);
+  const restored=validateNativeProject(JSON.parse(JSON.stringify(project)));
+  assert.throws(()=>{restored.match.deck1[0]=27000000;},TypeError);
+  const invalid=[...STANDARD_NATIVE_DECK];invalid[0]=28000006;
+  assert.throws(()=>validateNativeProject({...project,match:{...project.match,deck0:invalid}}),/牌序规则/);
+});

@@ -3,13 +3,14 @@ import {
   advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint, copyNativeNode,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
   nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK, DEFAULT_NATIVE_LEVEL,
-  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, projectForCurrentEngine, type NativeBattleAction,
+  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, validateNativeDeal, projectForCurrentEngine, type NativeBattleAction,
   type NativeReplayProject, type NativeWorkingBranch
 } from "./domain/nativeReplay.ts";
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
 import { arenaPixelToWorld } from "./native/geometry.ts";
 import NativeSurface from "./native/NativeSurface.tsx";
 import NativeNodeTree from "./native/NativeNodeTree.tsx";
+import NativeMatchDialog, {type NativeCreationInput} from "./native/NativeMatchDialog.tsx";
 import { openNativeProject, readNativeProject, listReplayArchives, saveNativeProject, rememberNativeSession, reopenNativeSession, type SavedReplayEntry } from "./native/files.ts";
 import { chooseSavesDirectory, getDefaultSavesDirectory } from "./utils/file.ts";
 import { clearNativeJournal, readNativeJournal, writeNativeJournal } from "./native/journal.ts";
@@ -41,11 +42,7 @@ export default function NativeApp() {
   const [archiveDirectory, setArchiveDirectory] = useState("");
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [archiveLoading, setArchiveLoading] = useState(false);
-  const [deckOpen, setDeckOpen] = useState(false);
-  const [draftDecks, setDraftDecks] = useState<number[][]>([[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]);
-  const [draftForms, setDraftForms] = useState<number[][]>([Array(8).fill(0),Array(8).fill(0)]);
-  const [deckSide, setDeckSide] = useState<0 | 1>(1);
-  const [cardSearch, setCardSearch] = useState("");
+  const [matchDialog,setMatchDialog]=useState<'create'|'view'|null>(null);
   const initialized = useRef(false);
   const busyRef = useRef(false);
   const projectRef = useRef(project);
@@ -233,21 +230,10 @@ export default function NativeApp() {
               }
               setNotice("项目已载入原生战斗引擎");
             } else {
-              const seed = Math.floor(Math.random() * 2**30);
-              const state = await bridge.post<NativeObservation>("/v1/reset", { seed, level:DEFAULT_NATIVE_LEVEL });
-              const next = createNativeProject(latest.identity,
-                { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK], level:DEFAULT_NATIVE_LEVEL },
-                state.tick, state.digest);
-              await rememberSnapshot(bridge, next.rootNodeId, state.tick);
-              putProject(next);
-              putBranch(checkoutNativeNode(next, next.rootNodeId));
-              putObservation(state);
-              putScrubRoute(null);
-              setFilePath(await saveNativeProject(next, null));
-              setNotice("原生战斗已就绪；选择任一方手牌，再点击竞技场出牌");
+              setNotice('战斗环境已就绪，请创建复盘存档并选择初始卡组和牌序');
             }
           });
-          if (!observationRef.current) initialized.current = false;
+          if (projectRef.current && !observationRef.current) initialized.current = false;
         }
         if (latest.ready && latest.playing && !busyRef.current && observationRef.current && !connectionErrorRef.current) {
           const state = await bridge.get<NativeObservation>("/v1/observe");
@@ -360,32 +346,46 @@ export default function NativeApp() {
   const profile = status?.cropProfile ?? EMPTY_PROFILE;
   const currentNode = project && branch ? project.nodes[branch.checkedOutNodeId] : null;
 
-  async function newProject(deck0: number[] = [...STANDARD_NATIVE_DECK], deck1: number[] = [...STANDARD_NATIVE_DECK], forms0:number[]=Array(8).fill(0), forms1:number[]=Array(8).fill(0)): Promise<void> {
-    if (!bridge || !status?.ready) return;
-    await exclusive(async () => {
-      validateNativeDeck(deck0);
-      validateNativeDeck(deck1);
-      validateNativeForms(deck0,forms0);
-      validateNativeForms(deck1,forms1);
-      if (projectRef.current) {
-        await saveNativeProject(projectRef.current, filePath);
-        if (branchRef.current?.actions.length) await writeNativeJournal(projectRef.current, branchRef.current);
+  async function newProject(input:NativeCreationInput):Promise<void> {
+    if(!bridge || !status?.ready)return;
+    await exclusive(async()=>{
+      const {title,deck0,deck1,forms0,forms1}=input;
+      [deck0,deck1].forEach(validateNativeDeck);
+      validateNativeForms(deck0,forms0);validateNativeForms(deck1,forms1);
+      [deck0,deck1].forEach(validateNativeDeal);
+      const previous=projectRef.current;
+      let previousWork=branchRef.current;
+      let previousState=observationRef.current;
+      if(previous && previousWork && previousState) {
+        previousState=await bridge.post<NativeObservation>('/v1/pause');
+        previousWork=advanceNativeWork(previousWork,previousState.tick);
+        putBranch(previousWork);putObservation(previousState);
+        await saveNativeProject(previous,filePath);
+        if(previousWork.actions.length)await writeNativeJournal(previous,previousWork);
       }
       await releaseSnapshots(bridge);
-      const seed = Math.floor(Math.random() * 2**30);
-      const state = await bridge.post<NativeObservation>("/v1/reset", { seed, deck0, deck1, forms0, forms1, level:DEFAULT_NATIVE_LEVEL });
-      const next = createNativeProject(status.identity,
-        { seed, preset: [deck0, deck1].every(deck => JSON.stringify(deck) === JSON.stringify(STANDARD_NATIVE_DECK)) && ![...forms0,...forms1].some(Boolean) ? "standard" : "custom", deck0, deck1, forms0, forms1, level:DEFAULT_NATIVE_LEVEL },
-        state.tick, state.digest);
-      await rememberSnapshot(bridge, next.rootNodeId, state.tick);
-      putProject(next);
-      putBranch(checkoutNativeNode(next, next.rootNodeId));
-      putObservation(state);
-      putScrubRoute(null);
-      setFilePath(await saveNativeProject(next, null));
-      setSelected(null);
-      setDeckOpen(false);
-      setNotice("已开始新战斗");
+      // A fixed verified deal seed keeps native omission rules reproducible.
+      const seed=41;
+      let state:NativeObservation;
+      try {
+        setNotice('正在由原生引擎校验初始牌序…');
+        state=await bridge.post<NativeObservation>('/v1/reset',{seed,deck0,deck1,forms0,forms1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'});
+      } catch(error) {
+        if(previous && previousWork && previousState) {
+          try {
+            const restored=await bridge.replay(previous.match.seed,[...nativeActionsToNode(previous,previousWork.checkedOutNodeId),...previousWork.actions],previousWork.workingTick,previousState.digest,undefined,undefined,undefined,previous.match);
+            putObservation(restored);putBranch(previousWork);
+          } catch {interrupt('新存档创建失败，原存档已保留；请恢复连接');}
+        }
+        throw error;
+      }
+      const next=createNativeProject(status.identity,{seed,preset:[deck0,deck1].every(deck=>JSON.stringify(deck)===JSON.stringify(STANDARD_NATIVE_DECK))&&![...forms0,...forms1].some(Boolean)?'standard':'custom',deck0,deck1,forms0,forms1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'},state.tick,state.digest,title);
+      await rememberSnapshot(bridge,next.rootNodeId,state.tick);
+      const nextPath=await saveNativeProject(next,null);
+      putProject(next);putBranch(checkoutNativeNode(next,next.rootNodeId));putObservation(state);putScrubRoute(null);
+      setFilePath(nextPath);setSelected(null);setMatchDialog(null);
+      initialized.current=true;
+      setStatus({...status,playing:false});setNotice('存档已创建；初始卡组与牌序已锁定');
     });
   }
 
@@ -730,20 +730,15 @@ export default function NativeApp() {
   const enemyElixir = observation?.players.find((player) => player.owner === 0)?.elixir;
   const ready = Boolean(status?.ready && observation && !connectionError);
   const settingUp = status?.setup?.state === "installing" || status?.setup?.state === "importing";
-  let deckError:string|null=null;
-  if(deckOpen) {
-    try { draftDecks.forEach(validateNativeDeck); draftDecks.forEach((deck,owner)=>validateNativeForms(deck,draftForms[owner])); }
-    catch(error) { deckError=String(error).replace(/^Error: /,''); }
-  }
 
   return <div className="native-app">
     <header className="native-header">
       <div className="native-brand"><span className="native-brand-icon">♛</span>
         <div><strong>皇室战争 · 原生战斗复盘</strong><small>时间线与平行分支</small></div></div>
       <div className="native-header-actions">
-        <button onClick={() => { void newProject(); }} disabled={!status?.ready || busy}>新战斗</button>
+        <button onClick={()=>setMatchDialog('create')} disabled={busy}>新建存档</button>
         <button onClick={() => { void showArchives(); }} disabled={busy}>存档</button>
-        <button onClick={() => { setDraftDecks(project ? [[...project.match.deck0], [...project.match.deck1]] : [[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]); setDraftForms([project?.match.forms0?.slice()??Array(8).fill(0),project?.match.forms1?.slice()??Array(8).fill(0)]); setDeckOpen(true); }} disabled={busy}>选择初始卡组</button>
+        <button onClick={()=>setMatchDialog('view')} disabled={!project||busy}>初始配置（只读）</button>
         <button onClick={() => { void openProject(); }} disabled={busy}>打开项目</button>
         <button onClick={() => { void configureRuntime(); }} disabled={busy}>设置运行环境</button>
         <button onClick={() => { void exportDiagnostics(); }} disabled={busy}>导出诊断</button>
@@ -778,7 +773,7 @@ export default function NativeApp() {
           return <button key={`${player.owner}-${ability.controllerSlot}`} disabled={!ready || busy || !entity || !ability.available || ability.remainingCooldownMs>0}
             onClick={()=>{if(entity)void activateAbility(player.owner as 0|1,entity.secondaryIndex,ability.actionDataGlobalId);}}>{player.owner===1?'我方':'敌方'} · {NATIVE_CARD_CATALOG.find(card=>card.abilityNames.includes(ability.actionDataName))?.name??'技能'}{ability.remainingCooldownMs>0?` · ${(ability.remainingCooldownMs/1000).toFixed(1)}s`:''}</button>;
         }))}</div>
-        <div className="battle-stage">{!observation ? <section className="first-run-panel">
+        <div className="battle-stage">{!project && status?.ready ? <section className="first-run-panel"><div className="first-run-symbol">♛</div><h2>创建复盘存档</h2><p>在创建时选择初始卡组、觉醒和精英形态，并排列起手牌与待抽牌。创建后初始配置固定。</p><button className="setup-primary" onClick={()=>setMatchDialog('create')}>新建存档</button></section> : !observation ? <section className="first-run-panel">
           <div className="first-run-symbol">♛</div>
           <h2>{status?.environmentConfigured && status?.resourcesConfigured ? "连接战斗环境" : "首次使用 · 准备战斗环境"}</h2>
           <p>画面与战斗规则由原生游戏提供。没有模拟器的电脑，可在这里安装所需的最小安卓环境。</p>
@@ -856,20 +851,6 @@ export default function NativeApp() {
         <button disabled={busy || entry.kind !== "native"} onClick={() => { void openProject(entry.path); }}>{entry.kind === "native" ? "打开" : entry.kind === "legacy" ? "请使用旧版" : "格式无效"}</button>
       </article>)}</div>
     </section></div>}
-    {deckOpen && <div className="native-dialog-backdrop"><section className="native-dialog deck-dialog" role="dialog" aria-modal="true" aria-labelledby="deck-heading">
-      <div className="dialog-heading"><h2 id="deck-heading">选择初始卡组</h2><button onClick={() => setDeckOpen(false)} disabled={busy}>关闭</button></div>
-      <p>双方各选择八张不同的卡牌，可设置觉醒与精英形态。应用后开始新战斗，当前项目先保存。卡牌和国王塔默认 16 级，起手牌由原生引擎按随机种子生成。</p>
-      <div className="deck-tabs">{([1,0] as const).map(owner => <button className={deckSide === owner ? 'active' : ''} onClick={() => setDeckSide(owner)} key={owner}>{owner === 1 ? '我方卡组' : '敌方卡组'} · {draftDecks[owner].length}/8</button>)}
-        <button onClick={() => {setDraftDecks([[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]);setDraftForms([Array(8).fill(0),Array(8).fill(0)]);}}>恢复标准卡组</button></div>
-      <div className="selected-deck">{draftDecks[deckSide].map((id,index) => { const card = NATIVE_CARD_CATALOG.find(card => card.id === id)!; return <div className="selected-deck-card" key={id}><button disabled={busy} onClick={() => {setDraftDecks(decks => decks.map((deck,owner) => owner === deckSide ? deck.filter(cardId => cardId !== id) : deck));setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?side.filter((_,slot)=>slot!==index):side));}} title="点击移除">
-        {((draftForms[deckSide][index]===1?card.evolutionImage:draftForms[deckSide][index]===2?card.heroImage:card.image)??card.image) ? <img src={(draftForms[deckSide][index]===1?card.evolutionImage:draftForms[deckSide][index]===2?card.heroImage:card.image)??card.image??undefined} alt=""/> : <span className="hand-card-fallback">{card.name.slice(0,2)}</span>}<strong>{card.name}</strong><small>{card.cost} 圣水 · 移除</small><span>{index+1}</span></button>
-        <select aria-label={`${deckSide===1?'我方':'敌方'}${card.name}形态`} value={draftForms[deckSide][index]??0} onChange={event=>setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?side.map((mode,slot)=>slot===index?Number(event.target.value):mode):side))}>
-          <option value={0}>普通</option>{Boolean(card.forms&1)&&<option value={1}>觉醒</option>}{Boolean(card.forms&2)&&<option value={2}>精英</option>}</select></div>; })}</div>
-      <input className="card-search" aria-label="搜索普通卡牌" placeholder="搜索卡牌名称…" value={cardSearch} onChange={event => setCardSearch(event.target.value)} />
-      <div className="card-catalog">{NATIVE_CARD_CATALOG.filter(card => `${card.name} ${card.engineName} ${card.forms&1?'觉醒':''} ${card.forms&2?'精英 英雄':''}`.toLowerCase().includes(cardSearch.trim().toLowerCase())).map(card => <button key={card.id}
-        className={draftDecks[deckSide].includes(card.id) ? 'selected' : ''} disabled={busy || draftDecks[deckSide].includes(card.id) || draftDecks[deckSide].length >= 8}
-        onClick={() => {setDraftDecks(decks => decks.map((deck,owner) => owner === deckSide ? [...deck,card.id] : deck));setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?[...side,0]:side));}}>{card.image && <img src={card.image} alt="" />}<strong>{card.name}</strong><small>{card.cost} 圣水</small><small>{card.forms&1?'觉醒 ':''}{card.forms&2?'精英':''}</small></button>)}</div>
-      <div className="deck-footer"><span>{deckError??'每方最多两张觉醒、两张精英，特殊形态合计最多三张'}</span><button className="setup-primary" disabled={!status?.ready || busy || Boolean(deckError)} onClick={() => { void newProject(draftDecks[0],draftDecks[1],draftForms[0],draftForms[1]); }}>{busy ? '正在创建战斗…' : '应用卡组并开始新战斗'}</button></div>
-    </section></div>}
+    {matchDialog && <NativeMatchDialog match={matchDialog==='view'?project?.match:undefined} busy={busy} ready={Boolean(status?.ready && !connectionError)} onClose={()=>setMatchDialog(null)} onCreate={input=>{void newProject(input);}}/>}
   </div>;
 }

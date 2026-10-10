@@ -110,6 +110,24 @@ class ControllerTest(unittest.TestCase):
             with self.assertRaises(ValueError):self.controller.reset(41,level=invalid)
         self.assertEqual(self.engine.reset_count,resets)
 
+    def test_invalid_initial_deal_is_rejected_before_touching_the_battle(self):
+        from bridge.match_config import STANDARD_DECK
+        resets=self.engine.reset_count
+        with self.assertRaises(ValueError):self.controller.reset(41,deal_mode='unknown')
+        deck=list(STANDARD_DECK);deck[0]=28000006
+        with self.assertRaisesRegex(ValueError,'牌序规则'):
+            self.controller.reset(41,deck,list(STANDARD_DECK),deal_mode='ordered')
+        self.assertEqual(self.engine.reset_count,resets)
+
+    def test_native_deal_remapping_keeps_each_cards_form(self):
+        from bridge.match_config import STANDARD_DECK,remap_deal
+        deck=tuple(STANDARD_DECK);layout=(2,0,4,7,6,1,3,5)
+        actual=tuple(deck[index] for index in layout)
+        forms=(2,1,0,0,0,0,0,0)
+        changed,changed_forms=remap_deal((deck,deck),(forms,forms),(actual,actual),(deck,deck))
+        self.assertEqual(tuple(changed[0][index] for index in layout),deck)
+        self.assertEqual(dict(zip(changed[0],changed_forms[0])),dict(zip(deck,forms)))
+
     def test_ability_ack_without_native_state_change_is_not_recorded(self):
         import copy
         ability={'actionDataGlobalId':29000000,'available':True,'remainingCooldownMs':0,

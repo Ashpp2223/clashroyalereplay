@@ -155,7 +155,7 @@ class BridgeRequest(BaseHTTPRequestHandler):
                     raise ValueError("请选择战斗资源包")
                 result = self.server.setup.import_resources(body["path"], controller)
             elif path == "/v1/reset":
-                result = controller.reset(body.get("seed", 1), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"))
+                result = controller.reset(body.get("seed", 1), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"))
             elif path == "/v1/pause":
                 result = controller.pause()
             elif path == "/v1/suspend":
@@ -184,7 +184,7 @@ class BridgeRequest(BaseHTTPRequestHandler):
                 result = controller.replay(body.get("seed"), body.get("actions", []),
                                            body.get("targetTick"), body.get("expectedDigest"),
                                            body.get("snapshotHandle"), body.get("baseTick"),
-                                           body.get("baseDigest"), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"))
+                                           body.get("baseDigest"), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"))
             else:
                 self._send(404, {"error": "not found"})
                 return

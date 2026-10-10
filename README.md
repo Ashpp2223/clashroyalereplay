@@ -2,7 +2,7 @@
 
 本地 Tauri + React 应用。中央窗口显示 Android 客户端渲染的原生战斗画面；左侧节点以引擎 tick 为时间轴，历史节点出牌会开启新分支并保留已有子分支。
 
-## 全卡牌安装版 0.2.2
+## 全卡牌安装版 0.3.0
 
 Windows 当前用户安装程序已接入独立桥接与视频解码器，应用运行无需系统 Python 或项目源代码。Android SDK、模拟器磁盘、游戏 APK 和更新资源仍由本机运行环境提供，不随安装包分发。
 
@@ -123,3 +123,22 @@ python -m bridge.install_runtime --serial emulator-5556 --update-apk $update
 真实验收脚本通过实际 HTTP 接口检查 tick 90、双方出牌、分支状态差异、跨分支快照恢复、快照后缀重放、从种子与日志重放、游戏进程关闭重启后重放、原版播放/暂停/变速和画面，并通过同一原生引擎的无画面接口运行含法术对局到终局，共 12 项检查。报告及截图保存为 `.local-runtime/native-runtime-check.*`；只有全部通过才会报告 `passed`。截图需另行人工检查，图像头校验不能证明画面无遮挡。模拟测试或前端构建不证明原版战斗可用。
 
 详细设计和验收项见 [设计文档](docs/superpowers/specs/2026-09-22-native-engine-replay-design.md)。
+
+
+## 配置边界与程序化验收
+
+| 部分 | 负责内容 |
+| --- | --- |
+| `src/domain/nativeReplay.ts` | 项目、节点、动作历史和不可变的初始配置 |
+| `src/native/NativeMatchDialog.tsx` | 创建存档时组卡、选形态和排列牌序；已有配置只读 |
+| `src/NativeApp.tsx` | 桌面会话、节点操作与桥接请求协调 |
+| `bridge/controller.py` / `bridge/match_config.py` | 原生发牌校准、动作确认、快照范围和日志重放 |
+| `src-tauri/src/main.rs` | 进程生命周期、文件原子保存和初始配置改写保护 |
+
+不再通过桌面鼠标逐项验收。本项目自己的 WebView2 在显式测试模式下开放回环调试端口；`scripts/desktop_control.mjs` 连接该独立测试实例，读取界面、执行 DOM 操作和保存截图。普通启动不启用这条测试通道。测试使用独立浏览器配置、存档、日志及专用 `emulator-5560`，不使用当前用户的窗口或项目。
+
+```powershell
+npm run test:desktop -- src-tauri/target/release/clash-replay-tree.exe "$env:LOCALAPPDATA/cr-replay-clean-test"
+```
+
+截图与验收报告位于被 Git 忽略的 `.local-runtime/desktop-check/`。发牌与历史的原生检查见 `scripts/verify_initial_deal.py`。这些脚本不向 Windows 注入鼠标或键盘输入。

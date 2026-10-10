@@ -14,6 +14,7 @@ use tauri::Manager;
 
 #[derive(Default)]
 struct BridgeState(Mutex<Option<BridgeProcess>>);
+static PROJECT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 struct BridgeProcess {
     child: Child,
@@ -144,8 +145,54 @@ fn read_project_file(path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn write_project_file(path: String, data: String) -> Result<(), String> {
+    let _guard = PROJECT_WRITE_LOCK.lock().map_err(|error| error.to_string())?;
     let file_path = PathBuf::from(path);
+    if file_path.is_file() {
+        let previous = fs::read_to_string(&file_path).map_err(format_io_error)?;
+        ensure_initial_configuration_unchanged(&previous,&data)?;
+    }
     atomic_write(&file_path, data.as_bytes())
+}
+
+fn ensure_initial_configuration_unchanged(previous: &str, next: &str) -> Result<(), String> {
+    let previous=serde_json::from_str::<serde_json::Value>(previous).ok();
+    if let Some(previous)=previous.filter(|value| value["schema"]=="cr-native-replay.v2") {
+        let next=serde_json::from_str::<serde_json::Value>(next).map_err(|error| error.to_string())?;
+        if next["schema"]!=previous["schema"] || next["projectId"]!=previous["projectId"] || next["match"]!=previous["match"] {
+            return Err("存档创建后初始卡组、牌序、等级和随机种子不可修改，请新建存档。".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn application_data_directory(app: &tauri::AppHandle) -> Result<PathBuf,String> {
+    if let Ok(directory)=std::env::var("CR_DESKTOP_TEST_HOME") {
+        let path=PathBuf::from(directory);
+        if !path.is_absolute() || path.file_name().is_none() { return Err("Test workspace must be an absolute directory".to_string()); }
+        return Ok(path);
+    }
+    app.path().app_local_data_dir().map_err(|error| error.to_string())
+}
+
+fn runtime_directory(app: &tauri::AppHandle) -> Result<PathBuf,String> {
+    if std::env::var_os("CR_DESKTOP_TEST_HOME").is_some() { return Ok(application_data_directory(app)?.join("runtime")); }
+    if cfg!(debug_assertions) {
+        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().ok_or("Cannot resolve repository root")?.join(".local-runtime"));
+    }
+    Ok(application_data_directory(app)?.join("runtime"))
+}
+
+#[tauri::command]
+fn native_test_workspace(app: tauri::AppHandle) -> Result<Option<String>,String> {
+    if std::env::var_os("CR_DESKTOP_TEST_HOME").is_none() { return Ok(None); }
+    Ok(Some(application_data_directory(&app)?.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+fn finish_desktop_test(app: tauri::AppHandle) -> Result<(),String> {
+    if std::env::var_os("CR_DESKTOP_TEST_HOME").is_none() { return Err("Desktop testing is not enabled".to_string()); }
+    app.exit(0);
+    Ok(())
 }
 
 fn atomic_write(file_path: &Path, data: &[u8]) -> Result<(), String> {
@@ -188,7 +235,7 @@ fn journal_path(app: &tauri::AppHandle, project_id: &str) -> Result<PathBuf, Str
     {
         return Err("Invalid journal project id".to_string());
     }
-    let directory = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
+    let directory = application_data_directory(app)?;
     Ok(directory.join("native-journals").join(format!("{project_id}.json")))
 }
 
@@ -235,13 +282,9 @@ async fn start_native_bridge(app: tauri::AppHandle, state: tauri::State<'_, Brid
     let token: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
     let resources = app.path().resource_dir().map_err(|error| error.to_string())?;
     let bundled = resources.join("native-bridge/native-bridge.exe");
-    let runtime_home = if cfg!(debug_assertions) {
-        root.join(".local-runtime")
-    } else {
-        app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime")
-    };
+    let runtime_home = runtime_directory(&app)?;
     fs::create_dir_all(&runtime_home).map_err(format_io_error)?;
-    seed_existing_runtime(&root.join(".local-runtime"), &runtime_home)?;
+    if std::env::var_os("CR_DESKTOP_TEST_HOME").is_none() { seed_existing_runtime(&root.join(".local-runtime"), &runtime_home)?; }
     // ADB is a shared host service. Start it outside the owned bridge job so
     // retiring this application cannot terminate other emulator connections.
     let settings = fs::read_to_string(runtime_home.join("runtime.json")).ok()
@@ -338,8 +381,7 @@ fn configure_native_runtime(app: tauri::AppHandle, state: tauri::State<BridgeSta
         || !settings["avdHome"].is_string() || !payload["path"].is_string() || !payload["apkSha256"].is_string() {
         return Err("请选择含运行环境设置和游戏准备记录的目录。".to_string());
     }
-    let target = if cfg!(debug_assertions) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".local-runtime") }
-        else { app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime") };
+    let target = runtime_directory(&app)?;
     let mut guard = state.0.lock().map_err(|error| error.to_string())?;
     if let Some(process) = guard.take() { retire_bridge(process); }
     atomic_write(&target.join("runtime.json"), config_text.as_bytes())?;
@@ -349,8 +391,7 @@ fn configure_native_runtime(app: tauri::AppHandle, state: tauri::State<BridgeSta
 
 #[tauri::command]
 fn native_runtime_directory(app: tauri::AppHandle) -> Result<String, String> {
-    let path = if cfg!(debug_assertions) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join(".local-runtime") }
-        else { app.path().app_local_data_dir().map_err(|error| error.to_string())?.join("runtime") };
+    let path = runtime_directory(&app)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -359,6 +400,12 @@ fn main() {
         .manage(BridgeState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            if std::env::var_os("CR_DESKTOP_TEST_HOME").is_some() {
+                if let Some(window)=app.get_webview_window("main") { window.hide()?; }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             ensure_writable_directory,
             executable_directory,
@@ -371,7 +418,9 @@ fn main() {
             start_native_bridge,
             configure_native_runtime,
             native_runtime_directory,
-            stop_native_bridge
+            stop_native_bridge,
+            native_test_workspace,
+            finish_desktop_test
         ])
         .build(tauri::generate_context!())
         .expect("failed to build tauri app");
@@ -413,6 +462,18 @@ fn format_io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_archive_allows_node_edits_but_never_initial_configuration_changes() {
+        let original=serde_json::json!({"schema":"cr-native-replay.v2","projectId":"same","match":{"seed":41,"level":16,"deck0":[1,2],"dealMode":"ordered"},"nodes":{}});
+        let mut edited=original.clone();edited["nodes"]=serde_json::json!({"one":{"note":"updated"}});
+        assert!(ensure_initial_configuration_unchanged(&original.to_string(),&edited.to_string()).is_ok());
+        for field in ["seed","level","deck0","dealMode"] {
+            let mut changed=original.clone();changed["match"][field]=serde_json::Value::Null;
+            assert!(ensure_initial_configuration_unchanged(&original.to_string(),&changed.to_string()).is_err());
+        }
+        assert!(ensure_initial_configuration_unchanged(&original.to_string(),"{}").is_err());
+    }
 
     #[test]
     fn first_run_discovers_complete_bom_configuration_without_overwriting_user_settings() {

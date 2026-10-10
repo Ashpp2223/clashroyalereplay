@@ -57,6 +57,11 @@ export async function getDefaultSavesDirectory(): Promise<string | null> {
     return null;
   }
 
+  const testDirectory = await invokeNative<string|null>('native_test_workspace',{});
+  if(testDirectory) {
+    const {join}=await import('@tauri-apps/api/path');
+    const directory=await join(testDirectory,'saves');await requireWritableDirectory(directory);return directory;
+  }
   const storedDirectory = readStoredSavesDirectory();
   if (storedDirectory && (await ensureWritableDirectory(storedDirectory))) {
     return storedDirectory;

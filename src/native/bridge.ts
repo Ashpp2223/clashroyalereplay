@@ -80,7 +80,7 @@ export class NativeBridge {
                baseDigest?: string, match?: NativeMatchConfig): Promise<NativeObservation> {
     return this.post("/v1/replay", {
       seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest,
-      deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level
+      deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level, dealMode:match?.dealMode
     });
   }
 

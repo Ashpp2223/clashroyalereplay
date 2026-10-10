@@ -11,7 +11,8 @@
     "heroImage": "/cards/hero-knight.png",
     "abilityNames": [
       "Knight_hero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000001,
@@ -23,7 +24,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-archers.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000002,
@@ -37,7 +39,8 @@
     "heroImage": "/cards/hero-goblins.png",
     "abilityNames": [
       "GoblinHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000003,
@@ -51,7 +54,8 @@
     "heroImage": "/cards/hero-giant.png",
     "abilityNames": [
       "GiantHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000004,
@@ -63,7 +67,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-pekka.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000005,
@@ -75,7 +80,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000006,
@@ -89,7 +95,8 @@
     "heroImage": "/cards/Hero-Balloon.png",
     "abilityNames": [
       "BalloonHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000007,
@@ -101,7 +108,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-witch.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000008,
@@ -113,7 +121,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-barbarians.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000009,
@@ -125,7 +134,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000010,
@@ -137,7 +147,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-skeletons.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000011,
@@ -151,7 +162,8 @@
     "heroImage": null,
     "abilityNames": [
       "ValkyrieHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000012,
@@ -163,7 +175,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-skeleton-army.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000013,
@@ -175,7 +188,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-bomber.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000014,
@@ -189,7 +203,8 @@
     "heroImage": "/cards/hero-musketeer.png",
     "abilityNames": [
       "Musketeer_hero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000015,
@@ -201,7 +216,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-baby-dragon.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000016,
@@ -213,7 +229,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000017,
@@ -227,7 +244,8 @@
     "heroImage": "/cards/hero-wizard.png",
     "abilityNames": [
       "WizardHeroAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000018,
@@ -241,7 +259,8 @@
     "heroImage": "/cards/hero-mini-pekka.png",
     "abilityNames": [
       "MiniPekkHeroAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000019,
@@ -253,7 +272,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000020,
@@ -265,7 +285,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000021,
@@ -277,7 +298,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000022,
@@ -289,7 +311,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-minionhorde.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000023,
@@ -301,7 +324,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000024,
@@ -313,7 +337,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-royal-giant.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000025,
@@ -325,7 +350,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000026,
@@ -337,7 +363,8 @@
     "forms": 1,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000027,
@@ -351,7 +378,8 @@
     "heroImage": "/cards/Hero-DarkPrince.png",
     "abilityNames": [
       "DarkPrinceHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000028,
@@ -363,7 +391,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000029,
@@ -375,7 +404,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000030,
@@ -387,7 +417,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-ice-spirit.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000031,
@@ -399,7 +430,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000032,
@@ -411,7 +443,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000033,
@@ -423,7 +456,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000034,
@@ -437,7 +471,8 @@
     "heroImage": "/cards/Hero-Bowler.png",
     "abilityNames": [
       "BowlerHeroAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000035,
@@ -449,7 +484,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-lumberjack.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000036,
@@ -461,7 +497,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-battle-ram.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000037,
@@ -473,7 +510,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-inferno-dragon.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000038,
@@ -487,7 +525,8 @@
     "heroImage": "/cards/hero-ice-golem.png",
     "abilityNames": [
       "IceGolemiteHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000039,
@@ -501,7 +540,8 @@
     "heroImage": "/cards/Hero-MegaMinion.png",
     "abilityNames": [
       "MegaMinion_Teleport_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000040,
@@ -513,7 +553,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-dart-goblin.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000041,
@@ -525,7 +566,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000042,
@@ -537,7 +579,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000043,
@@ -549,7 +592,8 @@
     "forms": 1,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000044,
@@ -561,7 +605,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-hunter.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000045,
@@ -573,7 +618,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-executioner.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000046,
@@ -585,7 +631,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000047,
@@ -597,7 +644,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-royal-recruits.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000048,
@@ -609,7 +657,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000049,
@@ -621,7 +670,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-bats.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000050,
@@ -633,7 +683,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-royal-ghost.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000051,
@@ -645,7 +696,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000052,
@@ -657,7 +709,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000053,
@@ -669,7 +722,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000054,
@@ -681,7 +735,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000055,
@@ -693,7 +748,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-mega-knight.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000056,
@@ -705,7 +761,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-skeleton-barrel.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000057,
@@ -717,7 +774,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000058,
@@ -729,7 +787,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-wall-breakers.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000059,
@@ -741,7 +800,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-royal-hogs.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000060,
@@ -753,7 +813,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-goblin-giant.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000061,
@@ -765,7 +826,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000062,
@@ -779,7 +841,8 @@
     "heroImage": "/cards/Hero-Magic-Archer.png",
     "abilityNames": [
       "EliteArcherHero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000063,
@@ -791,7 +854,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-electro-dragon.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000064,
@@ -803,7 +867,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-firecracker.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000065,
@@ -817,7 +882,8 @@
     "heroImage": null,
     "abilityNames": [
       "MightyMinerLaneSwitch"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000067,
@@ -829,7 +895,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000068,
@@ -841,7 +908,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000069,
@@ -855,7 +923,8 @@
     "heroImage": null,
     "abilityNames": [
       "SkeletonKing"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000072,
@@ -869,7 +938,8 @@
     "heroImage": null,
     "abilityNames": [
       "ArcherQueenRapid"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000074,
@@ -883,7 +953,8 @@
     "heroImage": null,
     "abilityNames": [
       "GoldenKnightChain"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000077,
@@ -897,7 +968,8 @@
     "heroImage": null,
     "abilityNames": [
       "Deflect"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000080,
@@ -909,7 +981,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000083,
@@ -921,7 +994,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000084,
@@ -933,7 +1007,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000085,
@@ -945,7 +1020,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000087,
@@ -957,7 +1033,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000093,
@@ -971,7 +1048,8 @@
     "heroImage": null,
     "abilityNames": [
       "ChampGuardianAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000095,
@@ -983,7 +1061,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000096,
@@ -995,7 +1074,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000097,
@@ -1007,7 +1087,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000099,
@@ -1021,7 +1102,8 @@
     "heroImage": null,
     "abilityNames": [
       "goblinstein_ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000101,
@@ -1033,7 +1115,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000102,
@@ -1047,7 +1130,8 @@
     "heroImage": null,
     "abilityNames": [
       "BerserkerHeroAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000103,
@@ -1061,7 +1145,8 @@
     "heroImage": null,
     "abilityNames": [
       "BossBandit_ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 26000106,
@@ -1073,7 +1158,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000000,
@@ -1085,7 +1171,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-cannon.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000001,
@@ -1097,7 +1184,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000002,
@@ -1109,7 +1197,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-mortar.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000003,
@@ -1121,7 +1210,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000004,
@@ -1133,7 +1223,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000005,
@@ -1145,7 +1236,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000006,
@@ -1157,7 +1249,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-tesla.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000007,
@@ -1169,7 +1262,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": true
   },
   {
     "id": 27000008,
@@ -1181,7 +1275,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000009,
@@ -1195,7 +1290,8 @@
     "heroImage": null,
     "abilityNames": [
       "Tombstone_hero_Ability"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000010,
@@ -1207,7 +1303,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-furnace.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000012,
@@ -1219,7 +1316,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-goblin-cage.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 27000013,
@@ -1231,7 +1329,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-goblin-drill.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000000,
@@ -1243,7 +1342,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000001,
@@ -1255,7 +1355,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000002,
@@ -1267,7 +1368,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000003,
@@ -1279,7 +1381,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000004,
@@ -1291,7 +1394,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-goblin-barrel.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000005,
@@ -1303,7 +1407,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000006,
@@ -1315,7 +1420,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": true
   },
   {
     "id": 28000007,
@@ -1327,7 +1433,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000008,
@@ -1339,7 +1446,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-zap.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000009,
@@ -1351,7 +1459,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000010,
@@ -1363,7 +1472,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000011,
@@ -1375,7 +1485,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000012,
@@ -1387,7 +1498,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000013,
@@ -1399,7 +1511,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000014,
@@ -1411,7 +1524,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000015,
@@ -1425,7 +1539,8 @@
     "heroImage": "/cards/Hero-Barbarian-Barrel.png",
     "abilityNames": [
       "BarbLogHeroAbility"
-    ]
+    ],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000016,
@@ -1437,7 +1552,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000017,
@@ -1449,7 +1565,8 @@
     "forms": 1,
     "evolutionImage": "/cards/evolved-giant-snowball.png",
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000018,
@@ -1461,7 +1578,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000023,
@@ -1473,7 +1591,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000024,
@@ -1485,7 +1604,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000025,
@@ -1497,7 +1617,8 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   },
   {
     "id": 28000026,
@@ -1509,6 +1630,7 @@
     "forms": 0,
     "evolutionImage": null,
     "heroImage": null,
-    "abilityNames": []
+    "abilityNames": [],
+    "omitFromStartingHand": false
   }
 ]

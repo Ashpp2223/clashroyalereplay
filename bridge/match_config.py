@@ -5,6 +5,7 @@ from .paths import ROOT
 CARDS = json.loads((ROOT / 'src/data/nativeCards.json').read_text(encoding='utf-8'))
 CARD_IDS = {card['id'] for card in CARDS}
 FORM_MASKS = {card['id']: card['forms'] for card in CARDS}
+OMITTED_STARTING_CARDS = {card['id'] for card in CARDS if card.get('omitFromStartingHand')}
 STANDARD_DECK = (26000000, 26000001, 26000005, 28000001, 28000000, 26000003, 26000014, 26000018)
 
 
@@ -13,6 +14,38 @@ def validate_level(level=None):
     if level is not None and (type(level) is not int or not 1<=level<=16):
         raise ValueError('战斗等级必须为 1～16 级')
     return level
+
+
+def validate_deal_mode(decks, mode=None):
+    if mode not in (None,'ordered'):
+        raise ValueError('初始牌序模式无效')
+    if mode=='ordered':
+        for deck in decks:
+            count=sum(card in OMITTED_STARTING_CARDS for card in deck)
+            positions=tuple(index for index,card in enumerate(deck) if card in OMITTED_STARTING_CARDS)
+            expected=() if count==0 else (7,) if count==1 else (5,7)
+            if positions!=expected:
+                raise ValueError('原生牌序规则：单张镜像或采集器在第 8 位；同时携带时在第 6、8 位')
+    return mode
+
+
+def ordered_deal(state):
+    return tuple(tuple(card.card for card in sorted(player.hand,key=lambda card:card.slot))+tuple(player.cycle)
+                 for player in state.players)
+
+
+def remap_deal(decks, forms, observed, requested):
+    result_decks=[];result_forms=[]
+    for deck,side_forms,actual,target in zip(decks,forms,observed,requested):
+        if len(actual)!=8 or set(actual)!=set(deck):
+            raise ValueError('原生引擎没有返回完整的八张初始牌序')
+        by_card=dict(zip(deck,side_forms))
+        remapped=list(deck)
+        for dealt_card,wanted_card in zip(actual,target):
+            remapped[deck.index(dealt_card)]=wanted_card
+        result_decks.append(tuple(remapped))
+        result_forms.append(tuple(by_card[card] for card in remapped))
+    return tuple(result_decks),tuple(result_forms)
 
 
 def validate_decks(deck0=None, deck1=None):
