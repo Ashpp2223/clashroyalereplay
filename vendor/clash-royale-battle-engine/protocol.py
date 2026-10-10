@@ -28,6 +28,7 @@ class Player:
     elixir: int  # Fixed-point native units: 10,000 = one elixir.
     hand: tuple[HandCard, ...]
     cycle: tuple[int, ...]
+    runtime: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,7 @@ class Entity:
         if entity_type == "projectile":
             traits = (None, None, None, values[2] in _BASIC_SPELLS)
         else:
-            traits = (*_BASIC_TRAITS[values[2]], None)
+            traits = (*_BASIC_TRAITS.get(values[2], (None, None, None)), None)
         return cls(*values, *traits)
 
 
@@ -66,6 +67,7 @@ class CardPlay:
     owner: int
     card: int
     cost: int
+    form: int = 0
 
 
 @dataclass(frozen=True)
@@ -86,8 +88,13 @@ class State:
             raise RuntimeError(data.get('error', 'native capture failed'))
         if data.get('schema') != 'cr-minimal.v3':
             raise RuntimeError(f"unsupported native capture schema: {data.get('schema')}; rebuild the replay probe")
+        def runtime_view(value):
+            if value:
+                for ability in value.get('abilityRuntime') or []:
+                    ability['championEntityKeys'] = [({'owner':key[0],'objectIndex':key[1],'secondaryIndex':key[2]} if isinstance(key,list) else key) for key in ability['championEntityKeys']]
+            return value
         players = tuple(Player(p['owner'], p['elixir'], tuple(HandCard(*c) for c in p['hand']),
-                               tuple(p['cycle'])) for p in data['players'])
+                               tuple(p['cycle']), runtime_view(p.get('runtime'))) for p in data['players'])
         entities = tuple(Entity.decode(e) for e in data['entities'])
         return cls(data['generation'], data['tick'], data['finalized'], data['result'],
                    tuple(data['crowns']), players, entities,

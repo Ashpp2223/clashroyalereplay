@@ -14,6 +14,7 @@ def main():
                "--name", "native-bridge", "--distpath", str(output), "--workpath", str(work),
                "--specpath", str(work), "--paths", str(ROOT), "--collect-all", "imageio_ffmpeg"]
     data = [(ROOT / "bridge/content_lock.json", "bridge"),
+            (ROOT / "src/data/nativeCards.json", "src/data"),
             (VENDOR / "standard_match.json", "vendor/clash-royale-battle-engine"),
             (VENDOR / "vendor/firstlight/supported_engine.json", "vendor/clash-royale-battle-engine/vendor/firstlight"),
             (VENDOR / "prebuilt/libcrprobe.so", "vendor/clash-royale-battle-engine/prebuilt"),

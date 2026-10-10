@@ -6450,6 +6450,9 @@ void handle_control_command(int socket_fd, const char *command) {
                      std::strcmp(command, "multi-stop") == 0 || std::strcmp(command, "engine-status") == 0;
 #endif
   const bool native_render_allowed = std::strncmp(command, "configure-native ", 17) == 0 ||
+                                     std::strncmp(command, "activate-ability ", 17) == 0 ||
+                                     std::strncmp(command, "replay-schedule-ability ", 24) == 0 ||
+                                     std::strncmp(command, "replay-schedule-status ", 23) == 0 ||
                                      std::strncmp(command, "play ", 5) == 0 ||
                                      std::strncmp(command, "replay-schedule-card ", 21) == 0 ||
                                      std::strncmp(command, "advance-native ", 15) == 0 ||

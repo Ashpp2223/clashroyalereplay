@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint,
+  advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint, copyNativeNode,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
-  nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK,
-  updateNativeNodeMetadata, type NativeBattleAction,
+  nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK, DEFAULT_NATIVE_LEVEL,
+  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, projectForCurrentEngine, type NativeBattleAction,
   type NativeReplayProject, type NativeWorkingBranch
 } from "./domain/nativeReplay.ts";
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
-import { arenaPixelToWorld, handSlotAtPixel } from "./native/geometry.ts";
+import { arenaPixelToWorld } from "./native/geometry.ts";
 import NativeSurface from "./native/NativeSurface.tsx";
-import { openNativeProject, saveNativeProject, rememberNativeSession, reopenNativeSession } from "./native/files.ts";
+import NativeNodeTree from "./native/NativeNodeTree.tsx";
+import { openNativeProject, readNativeProject, listReplayArchives, saveNativeProject, rememberNativeSession, reopenNativeSession, type SavedReplayEntry } from "./native/files.ts";
+import { chooseSavesDirectory, getDefaultSavesDirectory } from "./utils/file.ts";
 import { clearNativeJournal, readNativeJournal, writeNativeJournal } from "./native/journal.ts";
 import "./native.css";
 
@@ -34,6 +36,16 @@ export default function NativeApp() {
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [acceptSdkTerms, setAcceptSdkTerms] = useState(false);
   const [installDirectory, setInstallDirectory] = useState<string | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archives, setArchives] = useState<SavedReplayEntry[]>([]);
+  const [archiveDirectory, setArchiveDirectory] = useState("");
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveLoading, setArchiveLoading] = useState(false);
+  const [deckOpen, setDeckOpen] = useState(false);
+  const [draftDecks, setDraftDecks] = useState<number[][]>([[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]);
+  const [draftForms, setDraftForms] = useState<number[][]>([Array(8).fill(0),Array(8).fill(0)]);
+  const [deckSide, setDeckSide] = useState<0 | 1>(1);
+  const [cardSearch, setCardSearch] = useState("");
   const initialized = useRef(false);
   const busyRef = useRef(false);
   const projectRef = useRef(project);
@@ -129,7 +141,7 @@ export default function NativeApp() {
       try {
         const state = await client.replay(source.match.seed,
           actions.filter((action) => action.tick > base.finalTick && action.tick <= targetTick),
-          targetTick, expectedDigest, snapshots.current.get(base.id), base.finalTick, base.stateDigest);
+          targetTick, expectedDigest, snapshots.current.get(base.id), base.finalTick, base.stateDigest, source.match);
         const used = snapshots.current.get(base.id)!;
         snapshots.current.delete(base.id);
         snapshots.current.set(base.id, used);
@@ -141,7 +153,7 @@ export default function NativeApp() {
     }
     await releaseSnapshots(client);
     const state = await client.replay(source.match.seed,
-      actions.filter((action) => action.tick <= targetTick), targetTick, expectedDigest);
+      actions.filter((action) => action.tick <= targetTick), targetTick, expectedDigest, undefined, undefined, undefined, source.match);
     await cacheTarget();
     return state;
   }
@@ -191,37 +203,40 @@ export default function NativeApp() {
         if (latest.ready && !initialized.current && !busyRef.current && !connectionErrorRef.current) {
           initialized.current = true;
           await exclusive(async () => {
-            const loaded = projectRef.current;
+            let loaded = projectRef.current;
             if (loaded) {
-              if (Object.entries(latest.identity).some(([key, value]) =>
-                loaded.engine[key as keyof typeof latest.identity] !== value)) {
-                interrupt("项目与当前引擎版本不匹配，请打开匹配的项目");
-                throw new Error("项目与当前引擎版本不匹配");
-              }
+              const original=loaded;
+              const upgraded=projectForCurrentEngine(loaded,latest.identity);
+              loaded=upgraded.project;
               const root = loaded.nodes[recoveryNode.current ?? loaded.rootNodeId] ?? loaded.nodes[loaded.rootNodeId];
               setNotice(`正在恢复已保存节点「${root.title}」，请稍候…`);
-              let state = await bridge.replay(loaded.match.seed, nativeActionsToNode(loaded, root.id), root.finalTick, root.stateDigest);
+              let state = await bridge.replay(loaded.match.seed, nativeActionsToNode(loaded, root.id), root.finalTick, root.stateDigest, undefined, undefined, undefined, loaded.match);
               await rememberSnapshot(bridge, root.id, root.finalTick);
+              if(upgraded.upgraded) {
+                const path=await saveNativeProject(loaded,null);
+                putProject(loaded);setFilePath(path);
+              }
               putObservation(state);
               putBranch(checkoutNativeNode(loaded, root.id));
               recoveryNode.current = null;
               putScrubRoute(null);
-              const journal = await readNativeJournal(loaded);
+              const journal = await readNativeJournal(original);
               if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
                 state = await replayTo(bridge, loaded, journal.checkedOutNodeId,
                   [...nativeActionsToNode(loaded, journal.checkedOutNodeId), ...journal.actions],
                   journal.workingTick);
                 putObservation(state);
                 putBranch(journal);
+                if(upgraded.upgraded)await writeNativeJournal(loaded,journal);
               } else if (journal) {
                 await clearNativeJournal(loaded.projectId);
               }
               setNotice("项目已载入原生战斗引擎");
             } else {
               const seed = Math.floor(Math.random() * 2**30);
-              const state = await bridge.post<NativeObservation>("/v1/reset", { seed });
+              const state = await bridge.post<NativeObservation>("/v1/reset", { seed, level:DEFAULT_NATIVE_LEVEL });
               const next = createNativeProject(latest.identity,
-                { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] },
+                { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK], level:DEFAULT_NATIVE_LEVEL },
                 state.tick, state.digest);
               await rememberSnapshot(bridge, next.rootNodeId, state.tick);
               putProject(next);
@@ -345,14 +360,22 @@ export default function NativeApp() {
   const profile = status?.cropProfile ?? EMPTY_PROFILE;
   const currentNode = project && branch ? project.nodes[branch.checkedOutNodeId] : null;
 
-  async function newProject(): Promise<void> {
+  async function newProject(deck0: number[] = [...STANDARD_NATIVE_DECK], deck1: number[] = [...STANDARD_NATIVE_DECK], forms0:number[]=Array(8).fill(0), forms1:number[]=Array(8).fill(0)): Promise<void> {
     if (!bridge || !status?.ready) return;
     await exclusive(async () => {
+      validateNativeDeck(deck0);
+      validateNativeDeck(deck1);
+      validateNativeForms(deck0,forms0);
+      validateNativeForms(deck1,forms1);
+      if (projectRef.current) {
+        await saveNativeProject(projectRef.current, filePath);
+        if (branchRef.current?.actions.length) await writeNativeJournal(projectRef.current, branchRef.current);
+      }
       await releaseSnapshots(bridge);
       const seed = Math.floor(Math.random() * 2**30);
-      const state = await bridge.post<NativeObservation>("/v1/reset", { seed });
+      const state = await bridge.post<NativeObservation>("/v1/reset", { seed, deck0, deck1, forms0, forms1, level:DEFAULT_NATIVE_LEVEL });
       const next = createNativeProject(status.identity,
-        { seed, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] },
+        { seed, preset: [deck0, deck1].every(deck => JSON.stringify(deck) === JSON.stringify(STANDARD_NATIVE_DECK)) && ![...forms0,...forms1].some(Boolean) ? "standard" : "custom", deck0, deck1, forms0, forms1, level:DEFAULT_NATIVE_LEVEL },
         state.tick, state.digest);
       await rememberSnapshot(bridge, next.rootNodeId, state.tick);
       putProject(next);
@@ -361,47 +384,86 @@ export default function NativeApp() {
       putScrubRoute(null);
       setFilePath(await saveNativeProject(next, null));
       setSelected(null);
+      setDeckOpen(false);
       setNotice("已开始新战斗");
     });
   }
 
-  async function openProject(): Promise<void> {
+  async function refreshArchives(): Promise<void> {
+    setArchiveLoading(true);
+    setArchiveError(null);
+    try {
+      setArchiveDirectory(await getDefaultSavesDirectory() ?? "");
+      setArchives(await listReplayArchives());
+    } catch (error) { setArchiveError(String(error)); }
+    finally { setArchiveLoading(false); }
+  }
+
+  async function showArchives(): Promise<void> {
+    if (bridgeRef.current && status?.playing) {
+      await exclusive(async () => {
+        const state = await bridgeRef.current!.post<NativeObservation>("/v1/pause");
+        putObservation(state);
+        if (branchRef.current) putBranch(advanceNativeWork(branchRef.current, state.tick));
+        setStatus({ ...status, playing: false });
+      });
+    }
+    setArchiveOpen(true);
+    await refreshArchives();
+  }
+
+  async function changeArchiveDirectory(): Promise<void> {
+    try { if (await chooseSavesDirectory()) await refreshArchives(); }
+    catch (error) { setArchiveError(String(error)); }
+  }
+
+  async function openProject(path?: string): Promise<void> {
     await exclusive(async () => {
-      const opened = await openNativeProject();
+      const opened = path ? await readNativeProject(path) : await openNativeProject();
       if (!opened) return;
-      if (status && Object.entries(status.identity).some(([key, value]) =>
-        opened.project.engine[key as keyof typeof status.identity] !== value)) {
-        throw new Error("项目的引擎身份与当前运行时不匹配");
+      const active = projectRef.current;
+      if (active) {
+        await saveNativeProject(active, filePath);
+        if (branchRef.current?.actions.length) await writeNativeJournal(active, branchRef.current);
       }
+      const original=opened.project;
+      const upgrade=status?projectForCurrentEngine(opened.project,status.identity):{project:opened.project,upgraded:false};
+      opened.project=upgrade.project;
       if (bridge && status?.ready) {
         await releaseSnapshots(bridge);
         const root = opened.project.nodes[opened.project.rootNodeId];
-        let state = await bridge.replay(opened.project.match.seed, [], root.finalTick, root.stateDigest);
+        let state = await bridge.replay(opened.project.match.seed, [], root.finalTick, root.stateDigest, undefined, undefined, undefined, opened.project.match);
         await rememberSnapshot(bridge, opened.project.rootNodeId, root.finalTick);
-        const journal = await readNativeJournal(opened.project);
+        const journal = await readNativeJournal(original);
         if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
           state = await replayTo(bridge, opened.project, journal.checkedOutNodeId,
             [...nativeActionsToNode(opened.project, journal.checkedOutNodeId), ...journal.actions],
             journal.workingTick);
           putBranch(journal);
+          if(upgrade.upgraded)await writeNativeJournal(opened.project,journal);
         } else {
           if (journal) await clearNativeJournal(opened.project.projectId);
           putBranch(checkoutNativeNode(opened.project, opened.project.rootNodeId));
         }
         putObservation(state);
+        connectionErrorRef.current=null;setConnectionError(null);initialized.current=true;
       } else {
         putBranch(checkoutNativeNode(opened.project, opened.project.rootNodeId));
       }
       putProject(opened.project);
       putScrubRoute(null);
-      setFilePath(opened.path);
+      setFilePath(upgrade.upgraded?await saveNativeProject(opened.project,null):opened.path);
       setSelected(null);
+      setArchiveOpen(false);
       setNotice(`已打开 ${opened.project.title}`);
     });
   }
 
   async function saveProject(): Promise<void> {
     if (!projectRef.current) return;
+    if(bridge && status?.ready && branchRef.current && !connectionErrorRef.current && (status.playing || branchRef.current.workingTick>projectRef.current.nodes[branchRef.current.checkedOutNodeId].finalTick)) {
+      await checkpoint();return;
+    }
     await exclusive(async () => {
       const path = await saveNativeProject(projectRef.current!, filePath);
       setFilePath(path);
@@ -415,6 +477,11 @@ export default function NativeApp() {
       const state = await bridge.post<NativeObservation>("/v1/pause");
       putObservation(state);
       const work = advanceNativeWork(branchRef.current!, state.tick);
+      if(status)setStatus({...status,playing:false});
+      if(work.workingTick===projectRef.current!.nodes[work.checkedOutNodeId].finalTick) {
+        setFilePath(await saveNativeProject(projectRef.current!,filePath));setNotice('当前节点已保存');return;
+      }
+      const updated=Boolean(projectRef.current!.nodes[work.checkedOutNodeId].editableCopy);
       const result = createNativeCheckpoint(projectRef.current!, work, state.digest);
       await rememberSnapshot(bridge, result.node.id, state.tick);
       const savedPath = await saveNativeProject(result.project, filePath);
@@ -423,7 +490,7 @@ export default function NativeApp() {
       putScrubRoute(null);
       setFilePath(savedPath);
       await clearNativeJournal(result.project.projectId);
-      setNotice(`已在 ${formatNativeTick(state.tick)} 创建节点；战斗保持暂停`);
+      setNotice(`已${updated?'更新当前节点':'保存为子节点'} · ${formatNativeTick(state.tick)}；战斗保持暂停`);
     });
   }
 
@@ -431,11 +498,10 @@ export default function NativeApp() {
     if (!bridge || !projectRef.current || !branchRef.current ||
         (nodeId === branchRef.current.checkedOutNodeId && !scrubRouteRef.current)) return;
     const work = branchRef.current;
-    if (!scrubRouteRef.current && work.actions.length &&
-        !window.confirm("当前有未提交的出牌。先创建节点保存这条分支，再切换吗？")) return;
+
     await exclusive(async () => {
       let activeProject = projectRef.current!;
-      if (!scrubRouteRef.current && work.actions.length) {
+      if (!scrubRouteRef.current && (work.actions.length || (activeProject.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>activeProject.nodes[work.checkedOutNodeId].finalTick))) {
         const state = await bridge.post<NativeObservation>("/v1/pause");
         const saved = createNativeCheckpoint(activeProject, advanceNativeWork(work, state.tick), state.digest);
         await rememberSnapshot(bridge, saved.node.id, state.tick);
@@ -447,6 +513,7 @@ export default function NativeApp() {
         setFilePath(savedPath);
         await clearNativeJournal(activeProject.projectId);
       }
+      if(status)setStatus({...status,playing:false});
       const node = activeProject.nodes[nodeId];
       const state = await replayTo(bridge, activeProject, nodeId,
         nativeActionsToNode(activeProject, nodeId), node.finalTick, node.stateDigest);
@@ -543,12 +610,36 @@ export default function NativeApp() {
     });
   }
 
-  function selectHand(owner: 0 | 1, pixel: { x: number; y: number }): void {
-    if (connectionErrorRef.current || busyRef.current || !status?.ready || !observationRef.current) return;
-    const slot = handSlotAtPixel(profile, owner, pixel);
-    if (slot === null) return;
-    setSelected({ owner, slot });
-    setNotice(`${owner === 1 ? "我方" : "敌方"}已选择第 ${slot + 1} 张手牌；点击竞技场落点`);
+  function selectHand(owner:0|1,slot:number):void {
+    if(connectionErrorRef.current || busyRef.current || !status?.ready || !observationRef.current?.players.find(player=>player.owner===owner)?.hand.some(card=>card.slot===slot))return;
+    setSelected({owner,slot});
+    setNotice(`${owner===1?'我方':'敌方'}已选择第 ${slot+1} 张手牌；点击竞技场落点`);
+  }
+
+  async function copyNode():Promise<void> {
+    if(!bridge || !projectRef.current || !branchRef.current)return;
+    await exclusive(async()=>{
+      const state=await bridge.post<NativeObservation>('/v1/pause');
+      let source=projectRef.current!,work=advanceNativeWork(branchRef.current!,state.tick);
+      if(source.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>source.nodes[work.checkedOutNodeId].finalTick) {
+        const saved=createNativeCheckpoint(source,work,state.digest);
+        source=saved.project;work=saved.branch;
+        await rememberSnapshot(bridge,saved.node.id,state.tick);
+      }
+      const copied=copyNativeNode(source,work,state.digest);
+      await rememberSnapshot(bridge,copied.node.id,state.tick);
+      setFilePath(await saveNativeProject(copied.project,filePath));
+      putProject(copied.project);putBranch(copied.branch);putObservation(state);putScrubRoute(null);setSelected(null);
+      await clearNativeJournal(copied.project.projectId);
+      if(status)setStatus({...status,playing:false});
+      setNotice('已复制为子节点；在此继续出牌，保存会更新这个节点');
+    });
+  }
+
+  function moveNode(id:string,position:{x:number;y:number}):void {
+    if(!projectRef.current)return;
+    const next=updateNativeNodeMetadata(projectRef.current,id,{position});putProject(next);
+    void saveNativeProject(next,filePath).catch(error=>setNotice(`节点位置保存失败：${String(error)}`));
   }
 
   async function playAt(pixel: { x: number; y: number }): Promise<void> {
@@ -589,6 +680,22 @@ export default function NativeApp() {
     putProject(updateNativeNodeMetadata(projectRef.current, branchRef.current.checkedOutNodeId, patch));
   }
 
+  async function activateAbility(owner:0|1,entityId:number,abilityId:number):Promise<void> {
+    if (!bridge || !ready || !projectRef.current || !branchRef.current) return;
+    await exclusive(async()=>{
+      const receipt=await bridge.post<{accepted:boolean;observation:NativeObservation;action?:Omit<NativeBattleAction,'id'>}>('/v1/activate-ability',{owner,entityId,abilityId});
+      putObservation(receipt.observation);
+      let work=advanceNativeWork(branchRef.current!,receipt.observation.tick);
+      if(receipt.accepted && receipt.action) {
+        work=appendConfirmedNativeAction(projectRef.current!,work,{...receipt.action,id:crypto.randomUUID()});
+        await writeNativeJournal(projectRef.current!,work);
+        setNotice('技能已由原生引擎确认，记录到当前分支');
+      } else setNotice('技能执行未得到确认，未记录动作');
+      putBranch(work);putScrubRoute(null);setSelected(null);
+      if(status)setStatus({...status,playing:false});
+    });
+  }
+
   async function removeNode(): Promise<void> {
     if (!bridge || !projectRef.current || !branchRef.current) return;
     const id = branchRef.current.checkedOutNodeId;
@@ -619,23 +726,15 @@ export default function NativeApp() {
     });
   }
 
-  function renderNode(id: string, depth = 0): React.ReactNode {
-    if (!project) return null;
-    const node = project.nodes[id];
-    return <div key={id}>
-      <button className={`tree-node ${branch?.checkedOutNodeId === id ? "active" : ""}`}
-        style={{ paddingLeft: 14 + depth * 18 }} onClick={() => { void checkout(id); }} disabled={!ready || busy}>
-        <span className="tree-node-line">{node.title}</span>
-        <small>{formatNativeTick(node.finalTick)} · {node.actionsFromParent.length} 动作</small>
-      </button>
-      {node.childIds.map((childId) => renderNode(childId, depth + 1))}
-    </div>;
-  }
-
   const ownElixir = observation?.players.find((player) => player.owner === 1)?.elixir;
   const enemyElixir = observation?.players.find((player) => player.owner === 0)?.elixir;
   const ready = Boolean(status?.ready && observation && !connectionError);
   const settingUp = status?.setup?.state === "installing" || status?.setup?.state === "importing";
+  let deckError:string|null=null;
+  if(deckOpen) {
+    try { draftDecks.forEach(validateNativeDeck); draftDecks.forEach((deck,owner)=>validateNativeForms(deck,draftForms[owner])); }
+    catch(error) { deckError=String(error).replace(/^Error: /,''); }
+  }
 
   return <div className="native-app">
     <header className="native-header">
@@ -643,6 +742,8 @@ export default function NativeApp() {
         <div><strong>皇室战争 · 原生战斗复盘</strong><small>时间线与平行分支</small></div></div>
       <div className="native-header-actions">
         <button onClick={() => { void newProject(); }} disabled={!status?.ready || busy}>新战斗</button>
+        <button onClick={() => { void showArchives(); }} disabled={busy}>存档</button>
+        <button onClick={() => { setDraftDecks(project ? [[...project.match.deck0], [...project.match.deck1]] : [[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]); setDraftForms([project?.match.forms0?.slice()??Array(8).fill(0),project?.match.forms1?.slice()??Array(8).fill(0)]); setDeckOpen(true); }} disabled={busy}>选择初始卡组</button>
         <button onClick={() => { void openProject(); }} disabled={busy}>打开项目</button>
         <button onClick={() => { void configureRuntime(); }} disabled={busy}>设置运行环境</button>
         <button onClick={() => { void exportDiagnostics(); }} disabled={busy}>导出诊断</button>
@@ -654,10 +755,11 @@ export default function NativeApp() {
         <div className="panel-heading"><span>时间分支</span><span>{project ? Object.keys(project.nodes).length : 0} 节点</span></div>
         <div className="native-project-title">{project ? <input aria-label="战斗名称" value={project.title}
           onChange={(event) => putProject({ ...project, title: event.target.value, updatedAt: new Date().toISOString() })} /> : "等待战斗启动"}</div>
-        <div className="native-tree">{project && renderNode(project.rootNodeId)}</div>
+        {project && branch ? <NativeNodeTree project={project} selectedId={branch.checkedOutNodeId} disabled={!ready||busy} onSelect={id=>{void checkout(id);}} onMove={moveNode}/> : <div className="native-tree"/>}
+        <button className="wide-button" onClick={()=>{void copyNode();}} disabled={!ready||busy}>＋ 从当前节点创建子节点</button>
         <button className="wide-button" onClick={() => { void checkpoint(); }}
           disabled={!ready || busy || !branch || !currentNode || branch.workingTick <= currentNode.finalTick}>
-          ＋ 保存当前节点
+          保存当前节点
         </button>
         {branch && branch.actions.length > 0 && <div className="draft-note">● 新分支草稿 · {branch.actions.length} 个已确认动作</div>}
       </aside>
@@ -671,12 +773,17 @@ export default function NativeApp() {
             我 {ownElixir === undefined ? "—" : (ownElixir / 10000).toFixed(1)}
           </div>
         </div>
+        <div className="ability-toolbar">{observation?.players.flatMap(player=>(player.runtime?.abilityRuntime??[]).map(ability=>{
+          const entity=ability.championEntityKeys.find(key=>key);
+          return <button key={`${player.owner}-${ability.controllerSlot}`} disabled={!ready || busy || !entity || !ability.available || ability.remainingCooldownMs>0}
+            onClick={()=>{if(entity)void activateAbility(player.owner as 0|1,entity.secondaryIndex,ability.actionDataGlobalId);}}>{player.owner===1?'我方':'敌方'} · {NATIVE_CARD_CATALOG.find(card=>card.abilityNames.includes(ability.actionDataName))?.name??'技能'}{ability.remainingCooldownMs>0?` · ${(ability.remainingCooldownMs/1000).toFixed(1)}s`:''}</button>;
+        }))}</div>
         <div className="battle-stage">{!observation ? <section className="first-run-panel">
           <div className="first-run-symbol">♛</div>
           <h2>{status?.environmentConfigured && status?.resourcesConfigured ? "连接战斗环境" : "首次使用 · 准备战斗环境"}</h2>
           <p>画面与战斗规则由原生游戏提供。没有模拟器的电脑，可在这里安装所需的最小安卓环境。</p>
           <div className="setup-step"><strong>1 · 安卓运行环境</strong>
-            <span>{status?.environmentConfigured ? "已有环境已识别" : "首次下载约 1.9 GB，需要至少 16 GB 可用空间"}</span>
+            <span>{status?.environmentConfigured ? "已有环境已识别" : "首次下载约 1.9 GB，需要至少 28 GB 可用空间"}</span>
             {!status?.environmentConfigured && <>
               <label className="sdk-terms"><input type="checkbox" checked={acceptSdkTerms} onChange={(event) => setAcceptSdkTerms(event.target.checked)} />
                 <span>我已阅读并接受 <a href="https://developer.android.com/studio/terms" target="_blank" rel="noreferrer">Android SDK 使用条款</a></span></label>
@@ -687,7 +794,7 @@ export default function NativeApp() {
           </div>
           <div className="setup-step"><strong>2 · 本地战斗资源</strong>
             <span>{status?.resourcesConfigured ? "战斗资源已连接" : "选择复盘器战斗资源包；游戏文件不会随安装程序分发"}</span>
-            {!status?.resourcesConfigured && <button onClick={() => { void importResources(); }} disabled={!status?.environmentConfigured || settingUp || busy}>导入战斗资源包</button>}
+            <button onClick={() => { void importResources(); }} disabled={!status?.environmentConfigured || settingUp || busy}>{status?.resourcesConfigured?'更新战斗资源包':'导入战斗资源包'}</button>
           </div>
           {settingUp && <div className="setup-progress"><span>{status?.setup?.stage}</span>
             {status?.setup?.state === "installing" && <progress max={status.setup.total} value={status.setup.downloaded} />}
@@ -697,7 +804,7 @@ export default function NativeApp() {
             <button className="setup-primary" onClick={() => { void reconnect(); }} disabled={busy || settingUp || !status?.environmentConfigured || !status?.resourcesConfigured}>开始连接</button></div>
           <small>若电脑未启用虚拟化，安装向导会给出具体检查结果。</small>
         </section> : <NativeSurface bridge={bridge} ready={ready} profile={profile}
-          selected={selected} onHudClick={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
+          selected={selected} observation={observation} disabled={busy} onSelectCard={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
         {connectionError && <div className="native-recovery" role="alert">
           <span>{connectionError}</span><button onClick={() => { void reconnect(); }} disabled={busy}>恢复连接</button>
         </div>}
@@ -731,9 +838,38 @@ export default function NativeApp() {
         <div className="runtime-card"><strong>战斗连接</strong>
           <span>{status?.stage ?? "未连接"}</span>
           {status?.error && <p>{status.error}</p>}
-          <small>标准卡组 · 原生战斗</small>
+          <small>{project?.match.preset==='custom'?'自定义卡组':'标准卡组'} · {project?.match.level?`${project.match.level} 级`:'旧存档等级'} · 原生战斗</small>
         </div>
       </aside>
     </div>
+    {archiveOpen && <div className="native-dialog-backdrop"><section className="native-dialog archive-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-heading">
+      <div className="dialog-heading"><h2 id="archive-heading">复盘存档</h2><button onClick={() => setArchiveOpen(false)} disabled={busy}>关闭</button></div>
+      <p>选择已保存的原生战斗项目。第一版存档保留在列表中，需要用旧版记谱器打开。</p>
+      <div className="archive-tools"><button onClick={() => { void refreshArchives(); }} disabled={archiveLoading || busy}>刷新</button>
+        <button onClick={() => { void changeArchiveDirectory(); }} disabled={archiveLoading || busy}>选择存档目录</button>
+        <button onClick={() => { void openProject(); }} disabled={busy}>打开其他文件</button></div>
+      <div className="archive-directory">{archiveDirectory}</div>
+      {archiveError && <p role="alert" className="setup-error">{archiveError}</p>}
+      <div className="archive-list">{archiveLoading ? <p>正在读取存档…</p> : !archives.length ? <p>这个目录还没有复盘存档。新建战斗并保存后，会显示在这里。</p> : archives.map(entry => <article className="archive-entry" key={entry.path}>
+        <div><strong>{entry.title}</strong><span>{entry.kind === "native" ? "原生战斗" : entry.kind === "legacy" ? "第一版存档" : "无法读取"} · {entry.nodeCount} 节点{entry.updatedAt ? ` · ${new Date(entry.updatedAt).toLocaleString()}` : ""}</span>
+          <small>{entry.name}</small>{entry.error && <small>{entry.error}</small>}</div>
+        <button disabled={busy || entry.kind !== "native"} onClick={() => { void openProject(entry.path); }}>{entry.kind === "native" ? "打开" : entry.kind === "legacy" ? "请使用旧版" : "格式无效"}</button>
+      </article>)}</div>
+    </section></div>}
+    {deckOpen && <div className="native-dialog-backdrop"><section className="native-dialog deck-dialog" role="dialog" aria-modal="true" aria-labelledby="deck-heading">
+      <div className="dialog-heading"><h2 id="deck-heading">选择初始卡组</h2><button onClick={() => setDeckOpen(false)} disabled={busy}>关闭</button></div>
+      <p>双方各选择八张不同的卡牌，可设置觉醒与精英形态。应用后开始新战斗，当前项目先保存。卡牌和国王塔默认 16 级，起手牌由原生引擎按随机种子生成。</p>
+      <div className="deck-tabs">{([1,0] as const).map(owner => <button className={deckSide === owner ? 'active' : ''} onClick={() => setDeckSide(owner)} key={owner}>{owner === 1 ? '我方卡组' : '敌方卡组'} · {draftDecks[owner].length}/8</button>)}
+        <button onClick={() => {setDraftDecks([[...STANDARD_NATIVE_DECK], [...STANDARD_NATIVE_DECK]]);setDraftForms([Array(8).fill(0),Array(8).fill(0)]);}}>恢复标准卡组</button></div>
+      <div className="selected-deck">{draftDecks[deckSide].map((id,index) => { const card = NATIVE_CARD_CATALOG.find(card => card.id === id)!; return <div className="selected-deck-card" key={id}><button disabled={busy} onClick={() => {setDraftDecks(decks => decks.map((deck,owner) => owner === deckSide ? deck.filter(cardId => cardId !== id) : deck));setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?side.filter((_,slot)=>slot!==index):side));}} title="点击移除">
+        {((draftForms[deckSide][index]===1?card.evolutionImage:draftForms[deckSide][index]===2?card.heroImage:card.image)??card.image) ? <img src={(draftForms[deckSide][index]===1?card.evolutionImage:draftForms[deckSide][index]===2?card.heroImage:card.image)??card.image??undefined} alt=""/> : <span className="hand-card-fallback">{card.name.slice(0,2)}</span>}<strong>{card.name}</strong><small>{card.cost} 圣水 · 移除</small><span>{index+1}</span></button>
+        <select aria-label={`${deckSide===1?'我方':'敌方'}${card.name}形态`} value={draftForms[deckSide][index]??0} onChange={event=>setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?side.map((mode,slot)=>slot===index?Number(event.target.value):mode):side))}>
+          <option value={0}>普通</option>{Boolean(card.forms&1)&&<option value={1}>觉醒</option>}{Boolean(card.forms&2)&&<option value={2}>精英</option>}</select></div>; })}</div>
+      <input className="card-search" aria-label="搜索普通卡牌" placeholder="搜索卡牌名称…" value={cardSearch} onChange={event => setCardSearch(event.target.value)} />
+      <div className="card-catalog">{NATIVE_CARD_CATALOG.filter(card => `${card.name} ${card.engineName} ${card.forms&1?'觉醒':''} ${card.forms&2?'精英 英雄':''}`.toLowerCase().includes(cardSearch.trim().toLowerCase())).map(card => <button key={card.id}
+        className={draftDecks[deckSide].includes(card.id) ? 'selected' : ''} disabled={busy || draftDecks[deckSide].includes(card.id) || draftDecks[deckSide].length >= 8}
+        onClick={() => {setDraftDecks(decks => decks.map((deck,owner) => owner === deckSide ? [...deck,card.id] : deck));setDraftForms(forms=>forms.map((side,owner)=>owner===deckSide?[...side,0]:side));}}>{card.image && <img src={card.image} alt="" />}<strong>{card.name}</strong><small>{card.cost} 圣水</small><small>{card.forms&1?'觉醒 ':''}{card.forms&2?'精英':''}</small></button>)}</div>
+      <div className="deck-footer"><span>{deckError??'每方最多两张觉醒、两张精英，特殊形态合计最多三张'}</span><button className="setup-primary" disabled={!status?.ready || busy || Boolean(deckError)} onClick={() => { void newProject(draftDecks[0],draftDecks[1],draftForms[0],draftForms[1]); }}>{busy ? '正在创建战斗…' : '应用卡组并开始新战斗'}</button></div>
+    </section></div>}
   </div>;
 }

@@ -182,6 +182,22 @@ def require_success(output: str) -> None:
         raise RuntimeError(output or "Android 安装操作没有报告成功")
 
 
+def check_upgrade_space(device: Device, apk_bytes: int) -> None:
+    lines = device.shell('df -k /data').splitlines()
+    if len(lines)<2 or len(lines[-1].split())<4:
+        raise ValueError('无法检查虚拟设备内部空间，未开始升级')
+    available=int(lines[-1].split()[3])*1024
+    data_bytes=0
+    for path in LOCATIONS.values():
+        size=device.shell(f'if [ -d {shlex.quote(path)} ]; then du -sk {shlex.quote(path)}; fi')
+        if size:data_bytes+=int(size.split()[0])*1024
+    # Keep the installed copy, verified backup and PackageInstaller staging
+    # space available until the transaction and possible rollback complete.
+    required=data_bytes+3*apk_bytes+1024**3
+    if available<required:
+        raise ValueError(f'虚拟设备内部空间不足：升级需约 {required/1024**3:.1f} GB，当前 {available/1024**3:.1f} GB；现有安装未更改')
+
+
 def restore_data(device: Device, state: dict) -> None:
     uid = device.shell(f"stat -c %u {DATA}")
     if not uid.isdecimal() or int(uid) < 10000:
@@ -267,6 +283,7 @@ def install(device: Device, apk: Path, receipt_path: Path, *, original: bool = F
         validate_resources(before, base_asset_hashes(device, before, previous))
     if file_hash(device, previous) == build["apkSha256"]:
         return {"status": "already-installed", "serial": device.serial}
+    check_upgrade_space(device, apk.stat().st_size)
     device.shell(f"am force-stop {PACKAGE}")
     before = resource_hashes(device)
     if requires_update:
@@ -304,6 +321,17 @@ def install(device: Device, apk: Path, receipt_path: Path, *, original: bool = F
         if requires_update:
             validate_resources(before, base_asset_hashes(device, before, apk_path(device)))
     except (Exception, KeyboardInterrupt) as error:
+        # A rejected in-place install commonly leaves the existing package
+        # intact. Do not uninstall it merely to roll back a failed request.
+        intact=False
+        try:
+            intact=(file_hash(device,apk_path(device))==state['previousApkSha256'] and resource_hashes(device)==before)
+        except Exception:
+            pass
+        if intact:
+            state.update(status='unchanged',error=str(error))
+            save_receipt(receipt_path,state)
+            raise RuntimeError('游戏包升级失败，原安装和资源保持完整') from error
         try:
             restore(device, state, receipt_path)
         except Exception as rollback_error:
@@ -316,9 +344,7 @@ def install(device: Device, apk: Path, receipt_path: Path, *, original: bool = F
     return state
 
 
-def import_export(device: Device, export: Path, apk: Path) -> dict:
-    """Provision an empty SDK development device from a verified local export."""
-    device.check_environment()
+def validate_export(export: Path, apk: Path):
     build = validate_apk(apk)
     receipt = json.loads((export / "export-receipt.json").read_text(encoding="utf-8"))
     data = export / PACKAGE
@@ -330,6 +356,14 @@ def import_export(device: Device, export: Path, apk: Path) -> dict:
         base = {name: hashlib.sha256(archive.read("assets/" + name)).hexdigest()
                 for name in CONTENT_LOCK["apkFallbackFiles"] if name not in local}
     validate_resources(local, base)
+    return build, local
+
+
+def import_export(device: Device, export: Path, apk: Path) -> dict:
+    """Provision an empty SDK development device from a verified local export."""
+    device.check_environment()
+    build, local = validate_export(export, apk)
+    data = export / PACKAGE
     existing = device.shell(f"pm path {PACKAGE}", check=False)
     if existing:
         if not existing.startswith("package:") or file_hash(device, apk_path(device)) != build["apkSha256"]:

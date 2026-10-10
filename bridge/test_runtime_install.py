@@ -74,12 +74,18 @@ class FakeDevice:
         self.corrupt_backup = False
         self.fail_candidate = False
         self.fail_transport = False
+        self.fail_inplace = False
+        self.free_kib = 20*1024**2
 
     def check_environment(self, **_kwargs):
         pass
 
     def shell(self, script, **_kwargs):
         self.operations.append(script)
+        if script=='df -k /data':
+            return f'Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/block/vda 24000000 1000000 {self.free_kib} 5% /data'
+        if 'du -sk' in script:
+            return '1024 '+installer.DATA if script.startswith(f'if [ -d {installer.DATA} ];') else ''
         if script.startswith("pm path "):
             return "package:" + BASE if self.current else ""
         if script.startswith("dumpsys package "):
@@ -109,6 +115,8 @@ class FakeDevice:
             self.current = self.backup_hash
             return "Success"
         if " -r " in script:
+            if self.fail_inplace:
+                return 'Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]'
             if self.fail_transport:
                 self.current, self.resources = NEW, {}
                 raise ConnectionError("disconnected after installation")
@@ -135,6 +143,8 @@ class InstallationTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.receipt = Path(self.temp.name) / "install.json"
+        self.apk = Path(self.temp.name)/'candidate.apk'
+        self.apk.write_bytes(b'candidate fixture')
         self.device = FakeDevice()
         self.addCleanup(self.temp.cleanup)
         for name, replacement in (("validate_apk", lambda _: {"apkSha256": NEW}),
@@ -144,7 +154,24 @@ class InstallationTest(unittest.TestCase):
             self.addCleanup(context.stop)
 
     def install(self):
-        return installer.install(self.device, Path("candidate.apk"), self.receipt)
+        return installer.install(self.device, self.apk, self.receipt)
+
+    def test_low_storage_stops_before_backup_or_install(self):
+        self.device.free_kib=100
+        with self.assertRaisesRegex(ValueError,'内部空间不足'):
+            self.install()
+        self.assertEqual(self.device.current,OLD)
+        self.assertIsNone(self.device.backup_hash)
+        self.assertFalse(any(op.startswith('pm install') or op.startswith('pm uninstall') for op in self.device.operations))
+
+    def test_rejected_inplace_upgrade_never_uninstalls_intact_game(self):
+        self.device.fail_inplace=True
+        with self.assertRaisesRegex(RuntimeError,'原安装和资源保持完整'):
+            self.install()
+        self.assertEqual(self.device.current,OLD)
+        self.assertEqual(self.device.resources,RESOURCES)
+        self.assertFalse(any(op.startswith('pm uninstall') for op in self.device.operations))
+        self.assertEqual(json.loads(self.receipt.read_text())['status'],'unchanged')
 
     def test_signature_replacement_preserves_all_update_hashes_and_backup(self):
         result = self.install()

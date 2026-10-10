@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import os
 from .paths import VENDOR
 
 
@@ -23,7 +24,14 @@ def _load_package() -> None:
 def new_engine():
     _load_package()
     from native_engine.engine import RenderedEngine
-    return RenderedEngine()
+    return RenderedEngine(port=engine_port())
+
+
+def engine_port():
+    port = int(os.environ.get('CR_ENGINE_PORT', '26789'))
+    if not 1024 <= port <= 65535:
+        raise ValueError('战斗接口端口无效')
+    return port
 
 
 def new_play(owner: int, slot: int, x: int, y: int):

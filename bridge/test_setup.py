@@ -50,5 +50,6 @@ class SetupTest(unittest.TestCase):
             write_avd(root, root / "sdk")
             settings = json.loads((root / "runtime.json").read_text())
             self.assertEqual(settings["avdName"], "CR_Replay_API31")
+            self.assertIn("disk.dataPartition.size=20G",(root/"avd/CR_Replay_API31.avd/config.ini").read_text())
             self.assertTrue((Path(settings["avdHome"]) / "CR_Replay_API31.ini").is_file())
             self.assertIn(str(root / "sdk").replace("\\", "/"), (root / "avd/CR_Replay_API31.avd/config.ini").read_text())

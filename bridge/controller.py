@@ -9,6 +9,7 @@ from typing import Any
 
 from .engine_adapter import new_engine, new_play
 from .runtime import AndroidRuntime, MANIFEST, PROBE_SHA256, UPSTREAM_COMMIT
+from .match_config import validate_decks, validate_forms, validate_level, STANDARD_DECK
 
 
 def observation(state: Any) -> dict:
@@ -27,8 +28,16 @@ def observation(state: Any) -> dict:
             for entity in state.entities
         ],
     }
+    for player,native_player in zip(players,state.players):
+        runtime=getattr(native_player,'runtime',None) or {}
+        if runtime.get('abilityRuntime') or any(slot.get('progress',0)>0 for slot in runtime.get('evolutionRuntime') or []):
+            player['runtime']=runtime
     digest = hashlib.sha256(json.dumps(facts, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {**facts, "digest": digest}
+    enriched = [{**player, "hand":[{**card,"form":getattr(native_card,'parameter',0)&0x0f}
+                                  for card,native_card in zip(player['hand'],native_player.hand)],
+                 "cycle":list(native_player.cycle), "runtime": getattr(native_player, 'runtime', None)}
+                for player,native_player in zip(players,state.players)]
+    return {**facts, "players": enriched, "digest": digest}
 
 
 class BattleController:
@@ -39,6 +48,9 @@ class BattleController:
         self.lock = threading.RLock()
         self.playing = False
         self.seed: int | None = None
+        self.decks = (STANDARD_DECK, STANDARD_DECK)
+        self.forms = ((0,)*8,(0,)*8)
+        self.level = None
         self.attestation: dict | None = None
         self.last_error: str | None = None
 
@@ -107,13 +119,20 @@ class BattleController:
             self.last_error = reason
             return {"playing": False, "error": reason}
 
-    def reset(self, seed: int) -> dict:
+    def reset(self, seed: int, deck0=None, deck1=None, forms0=None, forms1=None, level=None) -> dict:
         with self.lock:
             if not isinstance(seed, int) or seed < 0 or seed > 2**31 - 1:
                 raise ValueError("随机种子无效")
+            decks = validate_decks(deck0, deck1)
+            forms = validate_forms(decks,forms0,forms1)
+            level = validate_level(level)
             engine = self._engine()
-            state = engine.reset(seed=seed)
+            state = (engine.reset(seed=seed) if decks == (STANDARD_DECK, STANDARD_DECK) and not any(any(side) for side in forms) and level is None
+                     else engine.reset(seed=seed, deck0=list(decks[0]), deck1=list(decks[1]), forms0=list(forms[0]), forms1=list(forms[1]), level=level))
             self.seed = seed
+            self.decks = decks
+            self.forms = forms
+            self.level = level
             self.playing = False
             return observation(state)
 
@@ -186,7 +205,7 @@ class BattleController:
                 "accepted": True, "observation": after,
                 "action": {"tick": event.tick, "sequence": event.sequence,
                            "owner": owner, "kind": "play-card", "nativeCardId": hand_card.card,
-                           "slot": slot, "nativeX": x, "nativeY": y},
+                           "slot": slot, "nativeX": x, "nativeY": y, "nativeForm":getattr(event,'form',0)},
             }
 
     def snapshot_create(self) -> dict:
@@ -196,6 +215,43 @@ class BattleController:
             result = self._engine().request("snapshot-create")
             if not result.get("ok"):
                 raise RuntimeError(result.get("error", "创建快照失败"))
+            return result
+
+    @staticmethod
+    def _ability(state, owner, entity_id, ability_id):
+        runtime = getattr(state.players[owner], 'runtime', None) or {}
+        return next((ability for ability in runtime.get('abilityRuntime') or []
+                     if ability['actionDataGlobalId'] == ability_id and
+                     any(key and key['secondaryIndex'] == entity_id for key in ability['championEntityKeys'])), None)
+
+    @classmethod
+    def _ability_changed(cls, before, after, owner, entity_id, ability_id):
+        old = cls._ability(before,owner,entity_id,ability_id)
+        current = cls._ability(after,owner,entity_id,ability_id)
+        return bool(old and ((current is None and not any(entity.id==entity_id for entity in after.entities)) or
+                            (current is not None and (current['remainingCooldownMs'] > old['remainingCooldownMs'] or
+                            current['remainingChargesRaw'] < old['remainingChargesRaw'] or
+                            current['buttonState'] != old['buttonState'])) or
+                            after.players[owner].elixir < before.players[owner].elixir))
+
+    def activate_ability(self, owner, entity_id, ability_id):
+        with self.lock:
+            if self.playing: self.pause()
+            if type(owner) is not int or owner not in (0,1) or type(entity_id) is not int or entity_id <= 0 or type(ability_id) is not int or ability_id <= 0:
+                raise ValueError('技能来源无效')
+            engine = self._engine(); before=engine.state
+            ability = self._ability(before,owner,entity_id,ability_id) if before else None
+            if not ability or not ability['available'] or ability['remainingCooldownMs']:
+                raise ValueError('当前技能不可释放')
+            accepted=engine.request(f'activate-ability {owner} -2 {entity_id} 1')
+            if not accepted.get('ok'):
+                return {'accepted':False,'observation':observation(before)}
+            after=engine.step(ticks=1).state
+            executed=self._ability_changed(before,after,owner,entity_id,ability_id)
+            result={'accepted':executed,'observation':observation(after)}
+            if executed:
+                result['action']={'tick':after.tick,'sequence':before.next_sequence,'owner':owner,
+                                  'kind':'activate-ability','nativeEntityId':entity_id,'nativeAbilityId':ability_id}
             return result
 
     def snapshot_restore(self, handle: int) -> dict:
@@ -228,13 +284,16 @@ class BattleController:
 
     def replay(self, seed: int, actions: list[dict], target_tick: int, expected_digest: str | None = None,
                snapshot_handle: int | None = None, base_tick: int | None = None,
-               base_digest: str | None = None) -> dict:
+               base_digest: str | None = None, deck0=None, deck1=None, forms0=None, forms1=None, level=None) -> dict:
         """Replay an event suffix from a live snapshot, or the full path from the seed."""
         with self.lock:
+            decks = validate_decks(deck0, deck1)
+            forms = validate_forms(decks,forms0,forms1)
+            level = validate_level(level)
             if snapshot_handle is None:
-                state = self.reset(seed)
+                state = self.reset(seed, list(decks[0]), list(decks[1]),list(forms[0]),list(forms[1]),level)
             else:
-                if self.seed != seed or not isinstance(base_tick, int) or not base_digest:
+                if self.seed != seed or self.decks != decks or self.forms != forms or self.level != level or not isinstance(base_tick, int) or not base_digest:
                     raise ValueError("快照基点无效")
                 state = self.snapshot_restore(snapshot_handle)
                 if state["tick"] != base_tick or state["digest"] != base_digest:
@@ -251,7 +310,7 @@ class BattleController:
                 while offset < len(ordered) and ordered[offset]["tick"] == tick:
                     group.append(ordered[offset])
                     offset += 1
-                if any(action.get("kind") != "play-card" for action in group) or tick > target_tick:
+                if any(action.get("kind") not in ("play-card", "activate-ability") for action in group) or tick > target_tick:
                     raise ValueError("动作不受当前引擎支持或晚于目标 tick")
                 current = self._engine().state.tick
                 if tick <= current:
@@ -260,20 +319,32 @@ class BattleController:
                 if gap:
                     self.step(gap)
                 before = self._engine().state
-                for action in group:
+                cards = [action for action in group if action['kind']=='play-card']
+                abilities = [action for action in group if action['kind']=='activate-ability']
+                for action in cards:
                     card = next((card for card in before.players[action["owner"]].hand
                                  if card.slot == action["slot"]), None)
                     if card is None or card.card != action["nativeCardId"]:
                         raise RuntimeError(f"重放手牌分歧：tick {tick}")
+                    if 'nativeForm' in action and card.parameter & 0x0f != action['nativeForm']:
+                        raise RuntimeError(f'重放卡牌形态分歧：tick {tick}')
+                for action in abilities:
+                    ability = self._ability(before,action['owner'],action['nativeEntityId'],action['nativeAbilityId'])
+                    if not ability or not ability['available']:
+                        raise RuntimeError(f'重放技能不可用：tick {tick}')
+                    ack = self._engine().request(f"activate-ability {action['owner']} -2 {action['nativeEntityId']} 1")
+                    if not ack.get('ok'):raise RuntimeError(f'重放技能被拒绝：tick {tick}')
                 transition = self._engine().step(
-                    [new_play(a["owner"], a["slot"], a["nativeX"], a["nativeY"]) for a in group], ticks=1)
+                    [new_play(a["owner"], a["slot"], a["nativeX"], a["nativeY"]) for a in cards], ticks=1)
                 if transition.advanced != 1 or not all(transition.executed):
                     raise RuntimeError(f"重放动作被拒绝：tick {tick}")
                 actual = [(event.owner, event.card) for event in transition.state.plays
                           if event.tick == tick]
-                expected = [(a["owner"], a["nativeCardId"]) for a in group]
+                expected = [(a["owner"], a["nativeCardId"]) for a in cards]
                 if actual != expected:
                     raise RuntimeError(f"重放事件分歧：tick {tick}")
+                if any(not self._ability_changed(before,transition.state,a['owner'],a['nativeEntityId'],a['nativeAbilityId']) for a in abilities):
+                    raise RuntimeError(f'重放技能状态未确认：tick {tick}')
             remaining = target_tick - self._engine().state.tick
             if remaining:
                 self.step(remaining)

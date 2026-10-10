@@ -5,6 +5,7 @@ import {
   appendConfirmedNativeAction,
   checkoutNativeNode,
   createNativeCheckpoint,
+  copyNativeNode,
   createNativeProject,
   deleteNativeSubtree,
   nativeActionsToNode,
@@ -45,6 +46,25 @@ test("historical checkout creates sibling worlds without mutating original desce
   validateNativeProject(alternate.project);
 });
 
+test('copy at the same tick, edit and save keeps one child; a later fork seals its history',()=>{
+  const root=createNativeProject(identity,match,90,'root');
+  const copy=copyNativeNode(root,checkoutNativeNode(root,root.rootNodeId),'root');
+  assert.equal(copy.node.finalTick,90);
+  validateNativeProject(copy.project);
+  const work=appendConfirmedNativeAction(copy.project,advanceNativeWork(copy.branch,91),play(91,0));
+  const saved=createNativeCheckpoint(copy.project,work,'played');
+  assert.equal(saved.node.id,copy.node.id);
+  assert.equal(Object.keys(saved.project.nodes).length,2);
+  assert.deepEqual(nativeActionsToNode(saved.project,saved.node.id),[play(91,0)]);
+  const next=copyNativeNode(saved.project,saved.branch,'played');
+  assert.equal(next.project.nodes[saved.node.id].editableCopy,false);
+  assert.equal(next.node.finalTick,91);
+  const alternative=createNativeCheckpoint(next.project,advanceNativeWork(checkoutNativeNode(next.project,saved.node.id),93),'alternate');
+  assert.deepEqual(alternative.project.nodes[saved.node.id].actionsFromParent,[play(91,0)]);
+  assert.equal(alternative.project.nodes[saved.node.id].finalTick,91);
+  validateNativeProject(alternative.project);
+});
+
 test("invalid time order and legacy projects are rejected", () => {
   const project = createNativeProject(identity, match, 90, "root");
   const branch = checkoutNativeNode(project, project.rootNodeId);
@@ -81,7 +101,26 @@ test("unsupported abilities, cards, seeds and missing engine identity are reject
   const project = createNativeProject(identity, match, 90, "root");
   const work = advanceNativeWork(checkoutNativeNode(project, project.rootNodeId), 91);
   assert.throws(() => appendConfirmedNativeAction(project, work, { ...play(91, 1), nativeCardId: 26000999 }));
-  assert.throws(() => appendConfirmedNativeAction(project, work, { ...play(91, 1), kind: "activate-ability", nativeEntityId: 1, nativeAbilityId: 2 }));
+  assert.throws(() => appendConfirmedNativeAction(project, work, { ...play(91, 1), kind: "activate-ability", nativeCardId:undefined, nativeEntityId: -1, nativeAbilityId: 2 }));
   assert.throws(() => validateNativeProject({ ...project, match: { ...match, seed: -1 } }));
   assert.throws(() => validateNativeProject({ ...project, engine: { upstreamCommit: "only-one-field" } }));
+});
+
+test("custom base decks survive serialization and reject cards outside the owner's deck", () => {
+  const deck0 = [...STANDARD_NATIVE_DECK]; deck0[7] = 27000000;
+  const project = createNativeProject(identity, { ...match, preset: 'custom', deck0 }, 90, 'root');
+  const restored = validateNativeProject(JSON.parse(JSON.stringify(project)));
+  assert.deepEqual(restored.match.deck0, deck0);
+  const work = advanceNativeWork(checkoutNativeNode(restored, restored.rootNodeId), 91);
+  assert.doesNotThrow(() => appendConfirmedNativeAction(restored, work, { ...play(91,1), owner:0, nativeCardId:27000000 }));
+  assert.throws(() => appendConfirmedNativeAction(restored, work, { ...play(91,1), owner:1, nativeCardId:27000000 }));
+  assert.throws(() => validateNativeProject({ ...project, match:{...project.match, deck0:Array(8).fill(26000000)} }));
+});
+
+test('level-16 matches retain their level while legacy archives retain the old template',()=>{
+  const legacy=createNativeProject(identity,match,90,'legacy');
+  assert.equal(validateNativeProject(legacy).match.level,undefined);
+  const current=createNativeProject(identity,{...match,level:16},90,'current');
+  assert.equal(validateNativeProject(JSON.parse(JSON.stringify(current))).match.level,16);
+  for(const level of [0,17,true,16.5])assert.throws(()=>validateNativeProject({...current,match:{...current.match,level}}));
 });

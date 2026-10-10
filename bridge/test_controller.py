@@ -22,7 +22,10 @@ class FakeEngine:
         self.reset_count = 0
         self.pending_actions = []
 
-    def reset(self, seed=1):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+        self.configured_decks = (deck0, deck1)
+        self.configured_forms = (forms0, forms1)
+        self.configured_level = level
         self.reset_count += 1
         self.snapshots.clear()
         self.state = self._state(90, ())
@@ -82,6 +85,48 @@ class ControllerTest(unittest.TestCase):
         self.controller.engine = self.engine
         self.controller.reset(41)
 
+    def test_form_configuration_cannot_reuse_another_form_snapshot(self):
+        from bridge.match_config import STANDARD_DECK
+        forms=[2]+[0]*7
+        base=self.controller.reset(41, list(STANDARD_DECK),list(STANDARD_DECK),[0]*8,forms)
+        snapshot=self.controller.snapshot_create()
+        self.assertEqual(self.engine.configured_forms[1],forms)
+        with self.assertRaisesRegex(ValueError,'快照基点无效'):
+            self.controller.replay(41,[],90,snapshot_handle=snapshot['handle'],base_tick=90,
+                base_digest=base['digest'],forms1=[1]+[0]*7)
+
+    def test_level_is_replayed_and_scopes_live_snapshots(self):
+        root=self.controller.reset(41,level=16)
+        snapshot=self.controller.snapshot_create()
+        self.assertEqual(self.engine.configured_level,16)
+        with self.assertRaisesRegex(ValueError,'快照基点'):
+            self.controller.replay(41,[],90,snapshot_handle=snapshot['handle'],base_tick=90,base_digest=root['digest'],level=11)
+        self.controller.replay(41,[],95,level=16)
+        self.assertEqual(self.engine.configured_level,16)
+        self.controller.replay(41,[],95)
+        self.assertIsNone(self.engine.configured_level)
+        resets=self.engine.reset_count
+        for invalid in (0,17,True,16.5):
+            with self.assertRaises(ValueError):self.controller.reset(41,level=invalid)
+        self.assertEqual(self.engine.reset_count,resets)
+
+    def test_ability_ack_without_native_state_change_is_not_recorded(self):
+        import copy
+        ability={'actionDataGlobalId':29000000,'available':True,'remainingCooldownMs':0,
+                 'remainingChargesRaw':1,'buttonState':2,
+                 'championEntityKeys':[{'owner':1,'objectIndex':-2,'secondaryIndex':123}]}
+        before=self.engine.state
+        before.players[1].runtime={'abilityRuntime':[ability]}
+        before.next_sequence=0
+        after=copy.deepcopy(before);after.tick+=1
+        def unconsumed(actions=(),ticks=1):
+            self.engine.state=after
+            return SimpleNamespace(state=after,advanced=1,executed=())
+        self.engine.step=unconsumed
+        receipt=self.controller.activate_ability(1,123,29000000)
+        self.assertFalse(receipt['accepted'])
+        self.assertNotIn('action',receipt)
+
     def test_only_confirmed_card_enters_action_receipt(self):
         self.engine.reject = True
         rejected = self.controller.play_card(1, 0, 3500, 13000)
@@ -109,6 +154,26 @@ class ControllerTest(unittest.TestCase):
         self.controller.step(4)
         restored = self.controller.snapshot_restore(snapshot["handle"])
         self.assertEqual(restored["tick"], 90)
+
+    def test_custom_decks_are_restored_on_cold_replay_and_scope_snapshots(self):
+        from bridge.match_config import STANDARD_DECK
+        custom = list(STANDARD_DECK)
+        custom[-1] = 27000000
+        root = self.controller.reset(41, custom, list(STANDARD_DECK))
+        snapshot = self.controller.snapshot_create()
+        with self.assertRaisesRegex(ValueError, '快照基点'):
+            self.controller.replay(41, [], 90, snapshot_handle=snapshot['handle'],
+                                   base_tick=90, base_digest=root['digest'])
+        result = self.controller.replay(41, [], 95, deck0=custom, deck1=list(STANDARD_DECK))
+        self.assertEqual(result['tick'], 95)
+        self.assertEqual(self.engine.configured_decks, (custom, list(STANDARD_DECK)))
+
+    def test_invalid_decks_do_not_reset_active_battle(self):
+        from bridge.match_config import STANDARD_DECK
+        resets = self.engine.reset_count
+        with self.assertRaisesRegex(ValueError, '八张'):
+            self.controller.reset(41, [26000000]*8, list(STANDARD_DECK))
+        self.assertEqual(self.engine.reset_count, resets)
 
     def test_restore_discards_future_actions_from_the_previous_branch(self):
         snapshot = self.controller.snapshot_create()

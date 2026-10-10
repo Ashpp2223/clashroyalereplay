@@ -22,3 +22,9 @@ of Supercell. Product names identify compatibility only.
 
 FirstLight CR 不接入 Supercell 官方服务器，不操作官方账号，不隶属于、
 不代表 Supercell，也未获其背书。产品名称仅用于标明兼容性。
+
+Local replay integration also derives card/form availability and ability names
+from Jaasssoooonnnnn/FirstLight_CR commit
+3ade158c52bf33de3ffcea600ce380946b7de0d8 (Apache-2.0).
+Derived data is stored in src/data/nativeCards.json; localized names and images
+use the replay recorder's existing local resources.

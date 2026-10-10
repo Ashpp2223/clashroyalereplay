@@ -96,7 +96,7 @@ def write_avd(home, sdk, device_home=None):
                 "hw.lcd.width": "1080", "hw.lcd.height": "1920", "hw.lcd.density": "320", "hw.lcd.depth": "32",
                 "hw.initialOrientation": "portrait", "hw.gpu.enabled": "yes", "hw.gpu.mode": "auto",
                 "hw.camera.front": "none", "hw.camera.back": "none", "hw.audioInput": "no", "hw.audioOutput": "no",
-                "hw.keyboard": "yes", "hw.mainKeys": "no", "disk.dataPartition.size": "10G"}
+                "hw.keyboard": "yes", "hw.mainKeys": "no", "disk.dataPartition.size": "20G"}
     (directory / "config.ini").write_text("\n".join(f"{key}={value}" for key, value in settings.items()) + "\n", encoding="utf-8")
     avd_home = directory.parent
     (avd_home / (name + ".ini")).write_text(f"avd.ini.encoding=UTF-8\npath={directory}\ntarget=android-31\n", encoding="utf-8")
@@ -131,8 +131,8 @@ class SetupManager:
             if not str(installation).isascii():
                 raise ValueError("安卓组件不兼容此路径，请点击更改安装位置，选择英文路径后重试")
             installation.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(installation).free < 16 * 1024**3:
-                raise ValueError("安装组件、战斗资源和虚拟设备需要至少 16 GB 可用磁盘空间")
+            if shutil.disk_usage(installation).free < 28 * 1024**3:
+                raise ValueError("安装组件、战斗资源和虚拟设备需要至少 28 GB 可用磁盘空间")
             self.status.update(state="installing", downloaded=0, error=None)
             sdk = installation / "sdk"
             for file, size, checksum, prefix, relative in ARCHIVES:
@@ -160,7 +160,7 @@ class SetupManager:
         def work():
             try:
                 from .runtime import AndroidRuntime, sha256
-                from .install_runtime import Device, import_export, validate_apk
+                from .install_runtime import Device, import_export, validate_apk, validate_export, install, PACKAGE
                 self.status.update(state="importing", stage="校验并导入战斗资源", error=None)
                 archive = Path(archive_path)
                 digest = sha256(archive)
@@ -176,6 +176,7 @@ class SetupManager:
                     raise ValueError("请选择复盘器战斗资源包")
                 apk = staging / "prepared.apk"
                 receipt = validate_apk(apk)
+                validate_export(staging / 'export',apk)
                 controller.close()
                 runtime = AndroidRuntime()
                 controller.runtime = runtime
@@ -188,7 +189,11 @@ class SetupManager:
                 runtime.command("root", check=False)
                 runtime.command("wait-for-device")
                 self.status["stage"] = "安装并核验战斗资源"
-                import_export(Device(str(runtime.adb), runtime.serial), staging / "export", apk)
+                device=Device(str(runtime.adb),runtime.serial)
+                if device.shell(f'pm path {PACKAGE}',check=False).startswith('package:'):
+                    install(device,apk,self.home/('resource-upgrade-'+digest[:16]+'.json'))
+                else:
+                    import_export(device, staging / "export", apk)
                 (self.home / "prepared.json").write_text(json.dumps({"path": str(apk), "apkSha256": receipt["apkSha256"]}), encoding="utf-8")
                 runtime.apk_sha256 = receipt["apkSha256"]
                 controller.last_error = None

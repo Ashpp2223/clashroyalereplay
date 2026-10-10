@@ -19,7 +19,7 @@ from .paths import ROOT, VENDOR, RUNTIME_HOME
 MANIFEST = json.loads((VENDOR / "vendor" / "firstlight" / "supported_engine.json").read_text())
 CONTENT_LOCK = json.loads((ROOT / "bridge/content_lock.json").read_text(encoding="utf-8"))
 UPSTREAM_COMMIT = "f92ccbecd6a1c9ad1fa3abaca54a51110607b6df"
-PROBE_SHA256 = "97044a901f4eaef335e09014631bd2ac7bd3d9701a7522c0c7b761413c7b2028"
+PROBE_SHA256 = "421d6f13dd060c15e94a180f78da9dbcfcd4dde088613f4bca215e021d9bb4e1"
 AVD_NAME = "CR_Dev_API31"
 DEVICE_PORT = 26789
 
@@ -118,7 +118,8 @@ class AndroidRuntime:
         self.stage = "启动原生探针"
         self.owns_session = True
         from .bootstrap_runtime import bootstrap
-        bootstrap(str(self.adb), self.serial, timeout=90)
+        from .engine_adapter import engine_port
+        bootstrap(str(self.adb), self.serial, port=engine_port(), timeout=90)
         self.stage = "读取能力声明"
         attest = self._attest()
         self.video = NativeFrameStream(str(self.adb), self.serial)
@@ -321,8 +322,9 @@ class AndroidRuntime:
             self.video = None
         if self.owns_session and self.serial:
             from .bootstrap_runtime import shutdown
+            from .engine_adapter import engine_port
             try:
-                shutdown(str(self.adb), self.serial)
+                shutdown(str(self.adb), self.serial, port=engine_port())
             except (OSError, subprocess.SubprocessError):
                 pass  # An exited Android process no longer owns live probe state.
             self.owns_session = False

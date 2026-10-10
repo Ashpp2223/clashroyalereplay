@@ -8,6 +8,24 @@ import time
 from .protocol import State
 
 
+def match_configuration(seed, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+    match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
+    match['rndSeed'] = seed
+    if level is not None:
+        if type(level) is not int or not 1<=level<=16:
+            raise ValueError('battle level must be an integer in 1..16')
+        match['battle']['lvlcap']=level
+        match['battle']['cardlvlmin']=level
+        for owner in range(2):
+            match['battle'][f'avatar{owner}']['expLevel']=level
+            match['battle']['hbd'][owner]['kt']=level
+    for owner, deck in enumerate((deck0, deck1)):
+        if deck is not None:
+            forms = (forms0, forms1)[owner] or [0]*8
+            match['battle'][f'deck{owner}']['sp'] = [{'d': card, **({'el':forms[index]} if forms[index] else {})} for index,card in enumerate(deck)]
+    return match
+
+
 @dataclass(frozen=True)
 class Play:
     owner: int
@@ -73,10 +91,9 @@ class Engine:
         state = State.decode(self.request(f'minimal {generation} {cursor}'))
         return state
 
-    def reset(self, seed=1):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
         self.state = None
-        match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
-        match['rndSeed'] = seed
+        match = match_configuration(seed, deck0, deck1, forms0, forms1, level)
         self.request('configure ' + json.dumps(match, separators=(',', ':')))
         self.request('step 90')  # First playable boundary; execute the first action at tick 91.
         self.state = self._capture()
@@ -106,10 +123,9 @@ class Engine:
 class RenderedEngine(Engine):
     """One paused, exactly stepped battle drawn by the stock game UI."""
 
-    def reset(self, seed=1):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
         self.state = None
-        match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
-        match['rndSeed'] = seed
+        match = match_configuration(seed, deck0, deck1, forms0, forms1, level)
         status = self.request('status')
         if status.get('mode') == 'resident-headless':
             raise RuntimeError('close the active Batch and call stop_resident() first')

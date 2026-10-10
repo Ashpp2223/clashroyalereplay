@@ -1,17 +1,46 @@
-import { getDefaultSavesDirectory, isTauriDesktop } from "../utils/file.ts";
+import { getDefaultSavesDirectory, isTauriDesktop, listSavedProjects } from "../utils/file.ts";
 import { validateNativeProject, type NativeReplayProject } from "../domain/nativeReplay.ts";
 
 export async function openNativeProject(): Promise<{ project: NativeReplayProject; path: string } | null> {
   if (!isTauriDesktop()) throw new Error("桌面文件功能不可用");
-  const [{ open }, { invoke }] = await Promise.all([
-    import("@tauri-apps/plugin-dialog"), import("@tauri-apps/api/core")
-  ]);
+  const { open } = await import("@tauri-apps/plugin-dialog");
   const path = await open({ multiple: false,
     defaultPath: await getDefaultSavesDirectory() ?? undefined,
     filters: [{ name: "原生战斗项目", extensions: ["json"] }] });
   if (!path || Array.isArray(path)) return null;
+  return readNativeProject(path);
+}
+
+export async function readNativeProject(path: string): Promise<{ project: NativeReplayProject; path: string }> {
+  const { invoke } = await import("@tauri-apps/api/core");
   const raw = JSON.parse(await invoke<string>("read_project_file", { path }));
   return { project: validateNativeProject(raw), path };
+}
+
+export interface SavedReplayEntry {
+  path: string;
+  title: string;
+  name: string;
+  updatedAt?: number;
+  nodeCount: number;
+  kind: "native" | "legacy" | "invalid";
+  error?: string;
+}
+
+export async function listReplayArchives(): Promise<SavedReplayEntry[]> {
+  const files = (await listSavedProjects()).filter(file => /\.cr-(?:native-)?replay\.json$/i.test(file.name));
+  const { invoke } = await import("@tauri-apps/api/core");
+  return Promise.all(files.map(async file => {
+    const entry: SavedReplayEntry = { ...file, title: file.name, nodeCount: 0, kind: "invalid" };
+    try {
+      const raw = JSON.parse(await invoke<string>("read_project_file", { path: file.path }));
+      if (raw?.version === 1 && typeof raw.projectName === "string" && raw.nodes && typeof raw.nodes === "object") {
+        return { ...entry, title: raw.projectName, nodeCount: Object.keys(raw.nodes).length, kind: "legacy" as const };
+      }
+      const project = validateNativeProject(raw);
+      return { ...entry, title: project.title, nodeCount: Object.keys(project.nodes).length, kind: "native" as const };
+    } catch (error) { return { ...entry, error: String(error) }; }
+  }));
 }
 
 export async function saveNativeProject(project: NativeReplayProject, currentPath: string | null): Promise<string> {

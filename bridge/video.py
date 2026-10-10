@@ -50,12 +50,12 @@ class NativeFrameStream:
             try:
                 self._adb_process = subprocess.Popen(
                     [self.adb, "-s", self.serial, "exec-out", "screenrecord", "--output-format=h264",
-                     "--time-limit", "180", "-"], stdout=subprocess.PIPE,
+                     "--size", "720x1280", "--bit-rate", "3000000", "--time-limit", "180", "-"], stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, creationflags=flags)
                 self._decoder_process = subprocess.Popen(
                     [ffmpeg, "-hide_banner", "-loglevel", "error", "-flags", "low_delay",
                      "-probesize", "32", "-analyzeduration", "0",
-                     "-f", "h264", "-i", "pipe:0", "-vf", "fps=20", "-q:v", "5",
+                     "-f", "h264", "-i", "pipe:0", "-vf", "fps=30", "-q:v", "5",
                      "-f", "image2pipe", "-vcodec", "mjpeg", "-flush_packets", "1", "pipe:1"],
                     stdin=self._adb_process.stdout, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, creationflags=flags)
@@ -77,7 +77,7 @@ class NativeFrameStream:
     def _read_frames(self, stream) -> None:
         pending = bytearray()
         while not self._stop.is_set():
-            chunk = stream.read(32768)
+            chunk = stream.read1(32768)
             if not chunk:
                 return
             pending.extend(chunk)

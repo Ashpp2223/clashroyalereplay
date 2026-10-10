@@ -1,5 +1,5 @@
 import { isTauriDesktop } from "../utils/file.ts";
-import type { EngineIdentity, NativeBattleAction } from "../domain/nativeReplay.ts";
+import type { EngineIdentity, NativeBattleAction, NativeMatchConfig } from "../domain/nativeReplay.ts";
 
 export interface CropProfile {
   id: string;
@@ -32,8 +32,14 @@ export interface NativeObservation {
   finalized: boolean;
   result: number | null;
   crowns: number[];
-  players: { owner: number; elixir: number; hand: { slot: number; card: number; cost: number }[] }[];
+  players: { owner: number; elixir: number; hand: { slot: number; card: number; cost: number; form?:number }[]; cycle:number[]; runtime?: { abilityRuntime: NativeAbility[] | null; evolutionRuntime: unknown[] | null } | null }[];
   entities: unknown[];
+}
+
+export interface NativeAbility {
+  controllerSlot:number; actionDataGlobalId:number; actionDataName:string;
+  remainingCooldownMs:number; remainingChargesRaw:number; buttonState:number; available:boolean;
+  championEntityKeys:({owner:number;objectIndex:number;secondaryIndex:number}|null)[];
 }
 
 interface BridgeInfo {
@@ -71,9 +77,10 @@ export class NativeBridge {
 
   async replay(seed: number, actions: NativeBattleAction[], targetTick: number,
                expectedDigest?: string, snapshotHandle?: number, baseTick?: number,
-               baseDigest?: string): Promise<NativeObservation> {
+               baseDigest?: string, match?: NativeMatchConfig): Promise<NativeObservation> {
     return this.post("/v1/replay", {
-      seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest
+      seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest,
+      deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level
     });
   }
 
