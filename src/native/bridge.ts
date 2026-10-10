@@ -67,8 +67,8 @@ export class NativeBridge {
     return this.request<T>("POST", path, body);
   }
 
-  async frame(): Promise<Blob> {
-    const response = await fetch(this.url("/v1/frame"), {
+  async frame(fresh = false): Promise<Blob> {
+    const response = await fetch(this.url(fresh?"/v1/frame?fresh=1":"/v1/frame"), {
       headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store", signal: AbortSignal.timeout(8000)
     });
     if (!response.ok) throw new Error(`画面读取失败：${response.status}`);

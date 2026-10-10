@@ -97,6 +97,27 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(calls, ["pause"])
         self.assertFalse(controller.playing)
 
+    def test_paused_frame_request_bypasses_the_buffered_video(self):
+        calls=[]
+        self.server.controller.runtime=SimpleNamespace(frame=lambda fresh=False:(calls.append(fresh) or (b'current-frame' if fresh else b'buffered-frame','image/png')))
+        for query,expected in [('',b'buffered-frame'),('?fresh=1',b'current-frame')]:
+            req=Request(self.base+'/v1/frame'+query,headers={'Authorization':'Bearer '+'a'*64})
+            with urlopen(req,timeout=2) as response:
+                self.assertEqual(response.read(),expected)
+        self.assertEqual(calls,[False,True])
+
+    def test_single_step_expected_tick_is_checked_before_advancing(self):
+        self.server.controller.engine=FakeEngine()
+        self.server.controller.reset(41)
+        def request():
+            return Request(self.base+'/v1/step',method='POST',headers={'Authorization':'Bearer '+'a'*64,'Content-Type':'application/json'},data=json.dumps({'ticks':1,'expectedTick':90}).encode())
+        with urlopen(request(),timeout=2) as response:
+            self.assertEqual(json.load(response)['tick'],91)
+        with self.assertRaises(HTTPError) as stale:
+            urlopen(request(),timeout=2)
+        self.assertEqual(stale.exception.code,400)
+        self.assertEqual(self.server.controller.engine.state.tick,91)
+
     def test_missing_contact_pauses_but_invalid_requests_do_not_renew_lease(self):
         calls = []
         controller = self.server.controller

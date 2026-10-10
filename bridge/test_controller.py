@@ -85,6 +85,27 @@ class ControllerTest(unittest.TestCase):
         self.controller.engine = self.engine
         self.controller.reset(41)
 
+    def test_paused_play_uses_the_confirmed_tick_and_advances_only_once(self):
+        receipt=self.controller.play_card(1,0,4500,24000,expected_tick=90)
+        self.assertTrue(receipt['accepted'])
+        self.assertEqual(receipt['action']['tick'],91)
+        self.assertEqual(receipt['observation']['tick'],91)
+        refused=self.controller.play_card(1,0,4500,24000,expected_tick=90)
+        self.assertFalse(refused['accepted'])
+        self.assertEqual(refused['observation']['tick'],91)
+        self.assertEqual(self.engine.state.tick,91)
+
+    def test_confirmed_single_step_rejects_stale_or_playing_bases_without_advancing(self):
+        self.assertEqual(self.controller.step(1,expected_tick=90)['tick'],91)
+        with self.assertRaisesRegex(ValueError,'单步基点'):
+            self.controller.step(1,expected_tick=90)
+        self.assertEqual(self.engine.state.tick,91)
+        self.controller.playing=True
+        with self.assertRaisesRegex(ValueError,'先暂停'):
+            self.controller.step(1,expected_tick=91)
+        self.assertEqual(self.engine.state.tick,91)
+        self.assertTrue(self.controller.playing)
+
     def test_form_configuration_cannot_reuse_another_form_snapshot(self):
         from bridge.match_config import STANDARD_DECK
         forms=[2]+[0]*7

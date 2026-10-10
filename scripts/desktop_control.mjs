@@ -10,9 +10,11 @@ async function freePort() {
   const port=server.address().port;await new Promise(done=>server.close(done));return port;
 }
 
-export async function openDesktopHarness({app,home,runtime}) {
+export async function openDesktopHarness({app,home,runtime,devUrl}) {
+  if(devUrl&&!/^http:\/\/127\.0\.0\.1:1420\/?$/.test(devUrl))throw new Error('Development preview must use the local project server');
   app=resolve(app);home=resolve(home);runtime=resolve(runtime);
-  await access(app);await access(join(dirname(app),'native-bridge','native-bridge.exe'));
+  await access(app);
+  if(!devUrl)await access(join(dirname(app),'native-bridge','native-bridge.exe'));
   await mkdir(join(home,'runtime'),{recursive:true});
   await mkdir(join(home,'screenshots'),{recursive:true});
   const settings=JSON.parse(await readFile(join(runtime,'runtime.json'),'utf8'));
@@ -22,7 +24,7 @@ export async function openDesktopHarness({app,home,runtime}) {
   const port=await freePort();
   const process=spawn(app,[],{windowsHide:true,stdio:'ignore',env:{...globalThis.process.env,
     CR_DESKTOP_TEST_HOME:home,CR_ENGINE_PORT:'26790',WEBVIEW2_USER_DATA_FOLDER:join(home,'webview'),
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port} --disable-background-timer-throttling --disable-renderer-backgrounding`}});
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows`}});
   let browser,page;
   try {
     const deadline=Date.now()+30000;
@@ -34,7 +36,7 @@ export async function openDesktopHarness({app,home,runtime}) {
     browser=await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     const pageDeadline=Date.now()+15000;
     while(Date.now()<pageDeadline) {
-      page=browser.contexts().flatMap(context=>context.pages()).find(page=>/^(?:https?:\/\/tauri\.localhost|tauri:\/\/localhost)/.test(page.url()));
+      page=browser.contexts().flatMap(context=>context.pages()).find(page=>/^(?:https?:\/\/tauri\.localhost|tauri:\/\/localhost)/.test(page.url())||(devUrl&&page.url().startsWith(devUrl)));
       if(page)break;
       await new Promise(done=>setTimeout(done,100));
     }

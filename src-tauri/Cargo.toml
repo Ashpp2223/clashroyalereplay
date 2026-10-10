@@ -1,6 +1,6 @@
 [package]
 name = "clash-replay-tree"
-version = "0.3.0"
+version = "0.3.7"
 description = "皇室战争原生战斗复盘器"
 authors = ["local"]
 edition = "2021"

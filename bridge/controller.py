@@ -179,8 +179,13 @@ class BattleController:
                 raise RuntimeError(result.get("error", "变速失败"))
             return {"speed": multiplier}
 
-    def step(self, ticks: int = 1) -> dict:
+    def step(self, ticks: int = 1, expected_tick: int | None = None) -> dict:
         with self.lock:
+            if expected_tick is not None:
+                if self.playing:
+                    raise ValueError('请先暂停，再逐帧前进')
+                if type(expected_tick) is not int or self._engine().state is None or self._engine().state.tick != expected_tick:
+                    raise ValueError('单步基点已变化，请恢复当前局面')
             if self.playing:
                 self.pause()
             if not isinstance(ticks, int) or not 1 <= ticks <= 1000000:
@@ -190,7 +195,7 @@ class BattleController:
                 raise RuntimeError("实际推进 tick 与请求不符")
             return observation(transition.state)
 
-    def play_card(self, owner: int, slot: int, x: int, y: int) -> dict:
+    def play_card(self, owner: int, slot: int, x: int, y: int, expected_tick: int | None = None) -> dict:
         with self.lock:
             if self.playing:
                 self.pause()
@@ -202,6 +207,11 @@ class BattleController:
             before = engine.state
             if before is None:
                 raise RuntimeError("战斗尚未暂停")
+            if expected_tick is not None:
+                if type(expected_tick) is not int:
+                    raise ValueError('出牌基点无效')
+                if expected_tick != before.tick:
+                    return {'accepted':False,'observation':observation(before)}
             hand_card = next((card for card in before.players[owner].hand if card.slot == slot), None)
             if hand_card is None:
                 raise ValueError("手牌槽位不可用")

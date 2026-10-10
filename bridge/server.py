@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 from .paths import RUNTIME_HOME
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from .controller import BattleController
 from .runtime import AndroidRuntime
@@ -114,7 +114,10 @@ class BridgeRequest(BaseHTTPRequestHandler):
             elif path == "/v1/observe":
                 self._send(200, self.server.controller.observe())
             elif path == "/v1/frame":
-                frame, format_name = self.server.controller.runtime.frame()
+                if parse_qs(urlparse(self.path).query).get('fresh') == ['1']:
+                    frame, format_name = self.server.controller.runtime.frame(fresh=True)
+                else:
+                    frame, format_name = self.server.controller.runtime.frame()
                 self._send(200, frame, format_name)
             else:
                 self._send(404, {"error": "not found"})
@@ -168,10 +171,10 @@ class BridgeRequest(BaseHTTPRequestHandler):
             elif path == "/v1/speed":
                 result = controller.speed(body.get("multiplier"))
             elif path == "/v1/step":
-                result = controller.step(body.get("ticks", 1))
+                result = controller.step(body.get("ticks", 1),body.get("expectedTick"))
             elif path == "/v1/play-card":
                 result = controller.play_card(body.get("owner"), body.get("slot"),
-                                              body.get("x"), body.get("y"))
+                                              body.get("x"), body.get("y"),body.get("expectedTick"))
             elif path == '/v1/activate-ability':
                 result = controller.activate_ability(body.get('owner'),body.get('entityId'),body.get('abilityId'))
             elif path == "/v1/snapshot-create":

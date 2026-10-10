@@ -133,16 +133,46 @@ input,textarea,select { border:1px solid #cbd5df; border-radius:7px; background:
 .native-hand { padding:5px 8px; background:#f8fbfe; }
 .native-hand-heading { display:flex; align-items:center; justify-content:space-between; gap:5px; color:#6e8092; font-size:10px; margin-bottom:4px; }
 .native-hand-heading strong { color:#345571; font-size:12px; }
-.native-hand-cards { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); gap:4px; }
+.native-elixir { flex:1; min-width:0; position:relative; height:24px; margin-left:8px; padding-left:25px; }
+.native-elixir-track { position:relative; height:19px; margin-top:3px; overflow:hidden; border:2px solid #65557b; border-radius:5px; background:linear-gradient(#32213f,#4c335c); box-shadow:0 1px 0 #fff,inset 0 1px 4px #150a2499; }
+.native-elixir-fill { height:100%; background:linear-gradient(#f8a6f6 0%,#e55fe6 35%,#bc32d1 65%,#d848df 100%); box-shadow:inset 0 2px 0 #ffc6fc99,inset 0 -2px 0 #8c20a980; transition:width 80ms linear; }
+.native-elixir-segments { position:absolute; inset:0; display:grid; grid-template-columns:repeat(10,minmax(0,1fr)); }
+.native-elixir-segments span+span { border-left:1px solid #3c1b5666; box-shadow:inset 1px 0 #ffb2ff33; }
+.native-elixir-value { position:absolute; left:0; top:-3px; width:36px; height:31px; display:grid; place-items:center; filter:drop-shadow(0 1px 1px #34154655); }
+.native-elixir-value img { position:absolute; height:31px; width:30px; object-fit:contain; }
+.native-elixir-value b { position:relative; display:inline-flex; align-items:baseline; margin-top:5px; color:#fff; font:800 12px/1 "Segoe UI",sans-serif; text-shadow:-1px -1px 0 #652273,1px -1px 0 #652273,-1px 1px 0 #652273,1px 1px 0 #652273; }
+.native-elixir-integer { font-size:18px; }
+.native-elixir-fraction { font-size:10px; }
+.native-elixir.full .native-elixir-track { border-color:#ad45b9; box-shadow:0 0 5px #e369df66,inset 0 1px 2px #fff5; }
+.native-elixir.unavailable .native-elixir-value img { filter:grayscale(.7); }
+@media(prefers-reduced-motion:reduce) { .native-elixir-fill { transition:none; } }
+.native-hand-groups { display:grid; grid-template-columns:3fr 2fr; gap:10px; }
+.native-hand-group { min-width:0; padding:2px 4px 1px; border:1px solid; border-radius:6px; }
+.native-hand-group.current { border-color:#75acd5; background:#eaf5ff; }
+.native-hand-group.queue { border-color:#b5c1ce; border-left:3px solid #92a4b7; background:#e1e7ee; }
+.native-hand-cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }
 .native-hand-cards button { position:relative; padding:3px 2px; display:flex; flex-direction:column; align-items:center; gap:2px; min-width:0; border-radius:5px; background:#fff; }
 .native-hand-cards button.queued { background:#e9eef4; border-style:dashed; }
 .native-hand-cards button:disabled { opacity:1; color:#8392a2; }
 .native-hand-cards button.selected { background:#e4f3ff; border:2px solid #2584c9; padding:2px 1px; }
-.native-hand-cards button img,.hand-card-fallback { width:100%; max-width:42px; height:37px; object-fit:contain; }
+.native-hand-cards button.unavailable::after { content:""; position:absolute; inset:0; z-index:2; border-radius:inherit; background:rgba(0,0,0,.5); pointer-events:none; }
+.native-hand-cards button .hand-card-art > img,.hand-card-fallback { width:100%; max-width:42px; height:37px; object-fit:contain; }
 .hand-card-fallback { display:grid; place-items:center; border-radius:4px; color:#557ca1; background:#e8f1f9; font-size:14px; }
 .native-hand-cards strong { max-width:100%; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:10px; }
-.native-hand-cards small { font-size:9px; color:#8665a1; }
-.hand-card-number { position:absolute; top:1px; left:3px; font-size:9px; color:#7190a8; }
+.hand-card-form { position:absolute; right:-2px; bottom:0; border-radius:3px; padding:1px 2px; color:#fff; background:#7446a5; font-size:8px; line-height:10px; }
+.hand-card-number { position:absolute; top:1px; right:3px; font-size:9px; color:#7190a8; }
+.hand-card-art { position:relative; width:100%; max-width:42px; height:37px; flex:none; }
+.hand-card-cost { position:absolute; top:-3px; left:-7px; width:21px; height:24px; display:grid; place-items:center; filter:drop-shadow(0 1px 1px #34154666); }
+.hand-card-cost img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+.hand-card-cost b { position:relative; margin-top:4px; color:#fff; font:800 12px "Segoe UI",sans-serif; text-shadow:-1px -1px 0 #652273,1px -1px 0 #652273,-1px 1px 0 #652273,1px 1px 0 #652273; }
+.native-hand-group.current .hand-card-art { max-width:48px; height:43px; }
+.native-hand-group.current .hand-card-art > img { max-width:48px; height:43px; }
+.native-hand-group.queue .hand-card-art { max-width:32px; height:31px; }
+.native-hand-group.queue .hand-card-art > img { max-width:32px; height:31px; }
+.native-hand-group.queue .hand-card-cost { width:18px; height:21px; left:-5px; }
+.native-hand-group.queue .hand-card-cost b { font-size:11px; margin-top:4px; }
+.native-hand-group.queue .native-hand-cards strong { font-size:9px; }
+@media(max-width:600px) { .native-hand-groups { gap:6px; } .native-hand-group { padding-left:3px; padding-right:3px; } }
 .new-archive-title { display:grid; gap:6px; color:#526d8e; font-size:12px; }
 .new-archive-title input { width:100%; }
 .deck-order-heading { padding:8px 0; color:#526d8e; font-size:12px; }

@@ -310,7 +310,9 @@ class AndroidRuntime:
             raise RuntimeError("模拟器未返回有效画面")
         return result.stdout
 
-    def frame(self) -> tuple[bytes, str]:
+    def frame(self, fresh: bool = False) -> tuple[bytes, str]:
+        if fresh:
+            return self.frame_png(), "image/png"
         streamed = self.video.frame() if self.video else None
         if streamed:
             return streamed, "image/jpeg"

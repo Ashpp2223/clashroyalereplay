@@ -54,8 +54,9 @@ class NativeFrameStream:
                     stderr=subprocess.DEVNULL, creationflags=flags)
                 self._decoder_process = subprocess.Popen(
                     [ffmpeg, "-hide_banner", "-loglevel", "error", "-flags", "low_delay",
+                     "-threads", "1",
                      "-probesize", "32", "-analyzeduration", "0",
-                     "-f", "h264", "-i", "pipe:0", "-vf", "fps=30", "-q:v", "5",
+                     "-f", "h264", "-i", "pipe:0", "-fps_mode", "passthrough", "-q:v", "5",
                      "-f", "image2pipe", "-vcodec", "mjpeg", "-flush_packets", "1", "pipe:1"],
                     stdin=self._adb_process.stdout, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, creationflags=flags)

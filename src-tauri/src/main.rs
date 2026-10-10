@@ -304,13 +304,13 @@ async fn start_native_bridge(app: tauri::AppHandle, state: tauri::State<'_, Brid
             if startup.try_wait().ok().flatten().is_none() { let _ = startup.kill(); let _ = startup.wait(); }
         }
     }
-    let mut command = if bundled.is_file() {
-        Command::new(&bundled)
-    } else if cfg!(debug_assertions) && root.join("bridge/server.py").is_file() {
+    let mut command = if cfg!(debug_assertions) && root.join("bridge/server.py").is_file() {
         let python = std::env::var("CR_BRIDGE_PYTHON").unwrap_or_else(|_| "python".to_string());
         let mut value = Command::new(python);
         value.args(["-m", "bridge.server"]).current_dir(&root);
         value
+    } else if bundled.is_file() {
+        Command::new(&bundled)
     } else {
         return Err("安装中的战斗连接服务缺失，请重新安装应用。".to_string());
     };
