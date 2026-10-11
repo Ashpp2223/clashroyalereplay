@@ -39,3 +39,32 @@ test("a matching confirmed draft is restored with its last confirmed time", asyn
   globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => JSON.stringify(entry) } };
   assert.deepEqual(await readNativeJournal(source), { checkedOutNodeId: source.rootNodeId, workingTick: 100, actions: entry.actions });
 });
+
+
+test("fresh open ignores old drafts and corrupt cache instead of replaying them", async () => {
+  const entry = { schema: "cr-native-journal.v1", projectId: source.projectId, engine: source.engine,
+    checkedOutNodeId: source.rootNodeId, workingTick: 100,
+    actions: [{ id: "old", tick: 91, sequence: 1, owner: 1, kind: "play-card", nativeCardId: 26000000, slot: 0, nativeX: 500, nativeY: 500 }] };
+  for (const stored of [JSON.stringify(entry), '{broken', JSON.stringify({...entry,engine:{},actions:'invalid'}), 'null']) {
+    globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => stored } };
+    assert.equal(await readNativeJournal(source, false), null);
+  }
+});
+
+test("fresh open preserves the confirmed project of an interrupted structural transaction", async () => {
+  const entry = { schema: "cr-native-journal.v1", projectId: source.projectId, engine: source.engine,
+    checkedOutNodeId: source.rootNodeId, workingTick: 91, actions: [],
+    undoRecovery: {project:source,digest:'confirmed'} };
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => JSON.stringify(entry) } };
+  const recovered = await readNativeJournal({...source,title:'Interrupted write'}, false);
+  assert.deepEqual(recovered.recoveryProject, source);
+  assert.equal(recovered.recoveryDigest,'confirmed');
+});
+
+test("fresh open refuses a transaction backup belonging to another project", async () => {
+  const entry = { schema: "cr-native-journal.v1", projectId: source.projectId, engine: source.engine,
+    checkedOutNodeId: source.rootNodeId, workingTick: 91, actions: [],
+    undoRecovery: {project:{...source,projectId:'other-project'},digest:'confirmed'} };
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => JSON.stringify(entry) } };
+  await assert.rejects(readNativeJournal(source, false), error=>error.code==='journalMismatch');
+});

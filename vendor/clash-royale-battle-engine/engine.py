@@ -8,7 +8,7 @@ import time
 from .protocol import State
 
 
-def match_configuration(seed, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+def match_configuration(seed, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
     match = json.loads(Path(__file__).with_name('standard_match.json').read_text())
     match['rndSeed'] = seed
     if level is not None:
@@ -20,6 +20,11 @@ def match_configuration(seed, deck0=None, deck1=None, forms0=None, forms1=None, 
             match['battle'][f'avatar{owner}']['expLevel']=level
             match['battle']['hbd'][owner]['kt']=level
     for owner, deck in enumerate((deck0, deck1)):
+        tower = (tower0, tower1)[owner]
+        if tower is not None:
+            if type(tower) is not int or tower not in (159000000,159000001,159000002,159000004):
+                raise ValueError('unsupported tower troop')
+            match['battle'][f'deck{owner}']['sc'][0]['d'] = tower
         if deck is not None:
             forms = (forms0, forms1)[owner] or [0]*8
             match['battle'][f'deck{owner}']['sp'] = [{'d': card, **({'el':forms[index]} if forms[index] else {})} for index,card in enumerate(deck)]
@@ -91,9 +96,9 @@ class Engine:
         state = State.decode(self.request(f'minimal {generation} {cursor}'))
         return state
 
-    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
         self.state = None
-        match = match_configuration(seed, deck0, deck1, forms0, forms1, level)
+        match = match_configuration(seed, deck0, deck1, forms0, forms1, level, tower0, tower1)
         self.request('configure ' + json.dumps(match, separators=(',', ':')))
         self.request('step 90')  # First playable boundary; execute the first action at tick 91.
         self.state = self._capture()
@@ -123,9 +128,9 @@ class Engine:
 class RenderedEngine(Engine):
     """One paused, exactly stepped battle drawn by the stock game UI."""
 
-    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
         self.state = None
-        match = match_configuration(seed, deck0, deck1, forms0, forms1, level)
+        match = match_configuration(seed, deck0, deck1, forms0, forms1, level, tower0, tower1)
         status = self.request('status')
         if status.get('mode') == 'resident-headless':
             raise RuntimeError('close the active Batch and call stop_resident() first')

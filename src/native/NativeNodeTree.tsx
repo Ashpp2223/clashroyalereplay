@@ -1,3 +1,4 @@
+import { useI18n } from './i18n.ts';
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { formatNativeTick, type NativeReplayProject } from '../domain/nativeReplay.ts';
 
@@ -5,6 +6,7 @@ export default function NativeNodeTree({project,selectedId,disabled,onSelect,onM
   project:NativeReplayProject; selectedId:string; disabled:boolean;
   onSelect:(id:string)=>void; onMove:(id:string,position:{x:number;y:number})=>void;
 }) {
+  const {t} = useI18n();
   const viewport=useRef<HTMLDivElement>(null);
   const [view,setView]=useState({x:20,y:25,scale:1});
   const [dragPosition,setDragPosition]=useState<{id:string;x:number;y:number}|null>(null);
@@ -46,16 +48,16 @@ export default function NativeNodeTree({project,selectedId,disabled,onSelect,onM
     setDragPosition(null);
   }
   return <>
-    <div className="tree-tools"><button onClick={fit}>适应视图</button><button aria-label="缩小节点树" onClick={()=>setView(v=>({...v,scale:Math.max(.15,v.scale/1.2)}))}>−</button><span>{Math.round(view.scale*100)}%</span><button aria-label="放大节点树" onClick={()=>setView(v=>({...v,scale:Math.min(2,v.scale*1.2)}))}>＋</button></div>
+    <div className="tree-tools"><button onClick={fit}>{t("fit")}</button><button aria-label={t("zoomOut")} onClick={()=>setView(v=>({...v,scale:Math.max(.15,v.scale/1.2)}))}>−</button><span>{Math.round(view.scale*100)}%</span><button aria-label={t("zoomIn")} onClick={()=>setView(v=>({...v,scale:Math.min(2,v.scale*1.2)}))}>＋</button></div>
     <div className="native-tree" ref={viewport} onPointerDown={event=>start(event,null)} onPointerMove={move} onPointerUp={finish} onPointerCancel={()=>{gesture.current=null;setDragPosition(null);}}
       onWheel={event=>{const bounds=event.currentTarget.getBoundingClientRect(),x=event.clientX-bounds.left,y=event.clientY-bounds.top;setView(v=>{const scale=Math.min(2,Math.max(.15,v.scale*Math.exp(-event.deltaY*.0015)));return {scale,x:x-(x-v.x)*scale/v.scale,y:y-(y-v.y)*scale/v.scale};});}}>
       <div className="tree-world" style={{transform:`translate(${view.x}px,${view.y}px) scale(${view.scale})`}}>
         <svg className="tree-links">{nodes.filter(node=>node.parentId).map(node=>{const parent=position(node.parentId!),child=position(node.id),x=parent.x+80,y=parent.y+64,endX=child.x+80,endY=child.y;return <path key={node.id} d={`M ${x} ${y} C ${x} ${(y+endY)/2}, ${endX} ${(y+endY)/2}, ${endX} ${endY}`} />;})}</svg>
         {nodes.map(node=>{const p=position(node.id);return <div key={node.id} data-node-id={node.id} className={`tree-node ${selectedId===node.id?'active':''}`} style={{left:p.x,top:p.y}} onPointerDown={event=>start(event,node.id)}>
-          <button disabled={disabled} onClick={event=>{if(event.detail===0)onSelect(node.id);}} title={`${node.title}\n${node.note}`}><span className="tree-node-line">{node.title}</span><small>{formatNativeTick(node.finalTick)} · {node.actionsFromParent.length} 动作{node.editableCopy?' · 可编辑':''}</small></button>
+          <button disabled={disabled} onClick={event=>{if(event.detail===0)onSelect(node.id);}} title={`${node.title}\n${node.note}`}><span className="tree-node-line">{node.title}</span><small>{formatNativeTick(node.finalTick)} · {node.actionsFromParent.length} {t("actions")}{node.editableCopy?` · ${t("editable")}`:''}</small></button>
         </div>;})}
       </div>
     </div>
-    <div className="tree-hint">点击切换 · 拖动节点或空白 · 滚轮缩放</div>
+    <div className="tree-hint">{t("treeHint")}</div>
   </>;
 }

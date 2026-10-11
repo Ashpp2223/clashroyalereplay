@@ -1,6 +1,6 @@
 {
   "name": "clash-replay-tree",
-  "version": "0.3.7",
+  "version": "0.3.10",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,10 +9,12 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:domain": "node tests/domain.test.mjs",
-    "test:native": "node --test tests/nativeReplay.test.mjs tests/nativeGeometry.test.mjs tests/nativeJournal.test.mjs && python -m unittest discover -s bridge -p test_*.py",
+    "test:native": "node --test tests/nativeReplay.test.mjs tests/nativeGeometry.test.mjs tests/nativeJournal.test.mjs tests/nativeUx.test.mjs && python -m unittest discover -s bridge -p test_*.py",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "test:frontend": "node scripts/verify_native_frontend.mjs",
+    "test:native-ux": "node scripts/verify_native_ux.mjs",
     "test:desktop": "node scripts/verify_desktop_app.mjs"
   },
   "dependencies": {

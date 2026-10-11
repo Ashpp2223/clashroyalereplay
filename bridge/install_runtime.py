@@ -65,8 +65,14 @@ def file_hash(device: Device, path: str) -> str:
     return digest
 
 
-def resource_hashes(device: Device, directory: str = DATA + "/update") -> dict[str, str]:
-    listing = device.shell(f"if [ -d {shlex.quote(directory)} ]; then cd {shlex.quote(directory)} && find . -type f -exec sha256sum {{}} +; fi")
+def resource_hashes(device: Device, directory: str = DATA + "/update", *, required_only: bool = False) -> dict[str, str]:
+    # Startup attests the pinned required files and all unfinished downloads.
+    # Installation/backup callers retain the full inventory of user resources.
+    selection = ""
+    if required_only:
+        paths = ["fingerprint.json", *CONTENT_LOCK["requiredFiles"]]
+        selection = "\\( " + " -o ".join("-path " + shlex.quote("./" + name) for name in paths) + " -o -name '*.update' \\) "
+    listing = device.shell(f"if [ -d {shlex.quote(directory)} ]; then cd {shlex.quote(directory)} && find . -type f {selection}-exec sha256sum {{}} +; fi")
     hashes = {}
     for line in listing.splitlines():
         fields = line.split(None, 1)
@@ -76,6 +82,22 @@ def resource_hashes(device: Device, directory: str = DATA + "/update") -> dict[s
         if not name or name.startswith("/") or ".." in name.split("/") or name in hashes:
             raise ValueError("游戏更新资源路径无效")
         hashes[name] = fields[0]
+    if required_only:
+        # A pending file may target an optional asset. Include that final file
+        # too, so recovery still refuses to overwrite conflicting content.
+        for name in list(hashes):
+            if not name.endswith(".update"):
+                continue
+            target = name.removesuffix(".update")
+            if target in hashes:
+                continue
+            path = shlex.quote(directory + "/" + target)
+            output = device.shell(f"if [ -f {path} ]; then sha256sum {path}; fi")
+            if output:
+                digest = output.split()[0]
+                if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                    raise ValueError("游戏更新资源清单无效")
+                hashes[target] = digest
     return hashes
 
 

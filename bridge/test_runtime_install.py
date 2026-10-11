@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from bridge import install_runtime as installer
 from scripts.prepare_probe_apk import patch_bootstrap
@@ -278,6 +278,47 @@ class ContentValidationTest(unittest.TestCase):
             self.assertGreater(text.index("invoke-static {}, Lcom/supercell/titan/GameApp;->nativeBootstrapProbe()V"), text.index('"g"'))
             with self.assertRaises(ValueError):
                 patch_bootstrap(source)
+
+
+class StartupResourcesTest(unittest.TestCase):
+    def test_startup_selection_checks_all_required_files_and_pending_conflicts(self):
+        device = Mock()
+        device.shell.side_effect = [
+            OLD + "  ./fingerprint.json\n" + NEW + "  ./sc/optional.sc.update",
+            "f" * 64 + "  /data/user/0/game/update/sc/optional.sc",
+        ]
+        hashes = installer.resource_hashes(device, "/data/user/0/game/update", required_only=True)
+        script = device.shell.call_args_list[0].args[0]
+        for name in installer.CONTENT_LOCK["requiredFiles"]:
+            self.assertIn("./" + name, script)
+        self.assertIn("-name '*.update'", script)
+        self.assertEqual(hashes['sc/optional.sc'], 'f' * 64)
+        self.assertEqual(hashes['sc/optional.sc.update'], NEW)
+        with patch.dict(installer.CONTENT_LOCK, {'fingerprints': [OLD]}), \
+             patch.object(installer, 'file_hash', return_value=OLD):
+            device.shell.side_effect = ['', json.dumps({'files':[{'file':'sc/optional.sc','sha':'a'*40}]}), 'a'*40 + ' file']
+            with self.assertRaisesRegex(ValueError, '冲突'):
+                installer.recover_pending_downloads(device, hashes)
+        self.assertFalse(any('cp ' in call.args[0] for call in device.shell.call_args_list))
+
+    def test_full_backup_inventory_still_hashes_every_file(self):
+        device = Mock()
+        device.shell.return_value = OLD + '  ./optional-file'
+        self.assertEqual(installer.resource_hashes(device), {'optional-file': OLD})
+        script = device.shell.call_args.args[0]
+        self.assertIn('find . -type f -exec sha256sum', script)
+        self.assertNotIn('-path', script)
+
+    def test_startup_rejects_missing_or_changed_required_content(self):
+        for value in (None, NEW):
+            hashes = dict(RESOURCES)
+            name = next(iter(installer.CONTENT_LOCK['requiredFiles']))
+            if value is None:
+                del hashes[name]
+            else:
+                hashes[name] = value
+            with self.assertRaisesRegex(ValueError, '缺失或不匹配'):
+                installer.validate_resources(hashes)
 
 
 if __name__ == "__main__":

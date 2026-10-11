@@ -17,3 +17,4 @@ src-tauri/gen
 *.lnk
 /src-tauri/resources/native-bridge/
 /release/native-desktop/
+.codex-remote-attachments/

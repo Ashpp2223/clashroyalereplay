@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import struct
 import subprocess
 import sys
 import time
+import zlib
 
 from .video import NativeFrameStream
 from .paths import ROOT, VENDOR, RUNTIME_HOME
@@ -51,9 +54,11 @@ class AndroidRuntime:
         self.serial: str | None = None
         self.process: subprocess.Popen | None = None
         self.stage = "未启动"
+        self.stage_code = "idle"
         self.error: str | None = None
         self.apk_sha256 = self._prepared_apk_hash()
         self.video: NativeFrameStream | None = None
+        self.frame_encoder: str | None = None
         self.owns_session = False
         self.runtime_fingerprint_sha256 = MANIFEST["runtime_fingerprint_sha256"]
         config_path = RUNTIME_HOME / "runtime.json"
@@ -72,7 +77,7 @@ class AndroidRuntime:
             data = json.loads(prepared.read_text(encoding="utf-8-sig"))
             path = Path(data.get("path", ""))
             expected = data.get("apkSha256", "").lower()
-            if path.is_file() and len(expected) == 64 and sha256(path) == expected:
+            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}", expected):
                 return expected
         return MANIFEST["apk_sha256"]
 
@@ -88,8 +93,16 @@ class AndroidRuntime:
 
     def start(self) -> dict:
         self.stage = "检查环境"
+        self.stage_code = "checking"
         if not self.adb.is_file():
             raise RuntimeError("未找到 ADB；请安装 Android platform-tools 或设置 CR_ADB")
+        # Hash the local APK in the background startup, after the HTTP greeting.
+        prepared = RUNTIME_HOME / "prepared.json"
+        if prepared.is_file():
+            payload = json.loads(prepared.read_text(encoding="utf-8-sig"))
+            path = Path(payload.get("path", ""))
+            if not path.is_file() or sha256(path) != self.apk_sha256:
+                raise RuntimeError("本地准备的 APK 缺失或哈希不符")
         local_probe = VENDOR / "prebuilt" / "libcrprobe.so"
         if sha256(local_probe) != PROBE_SHA256:
             raise RuntimeError("本地探针哈希不符")
@@ -102,8 +115,10 @@ class AndroidRuntime:
             self._launch_sdk_emulator()
             self.serial = self._wait_for_avd(120)
         self.stage = "等待 Android 启动"
+        self.stage_code = "android"
         self._wait_for_boot(120)
         self.stage = "校验运行时"
+        self.stage_code = "verifying"
         root = self.command("root", timeout=30, check=False)
         if root.returncode:
             raise RuntimeError("Android 运行环境未开启 ADB root 权限")
@@ -116,15 +131,24 @@ class AndroidRuntime:
             self.command("shell", "settings", "--user", "0", "put", "secure", "immersive_mode_confirmations", "confirmed")
         self._check_installed_runtime()
         self.stage = "启动原生探针"
+        self.stage_code = "probe"
         self.owns_session = True
         from .bootstrap_runtime import bootstrap
         from .engine_adapter import engine_port
-        bootstrap(str(self.adb), self.serial, port=engine_port(), timeout=90)
+        bootstrap(str(self.adb), self.serial, port=engine_port(), timeout=90, verified=True)
         self.stage = "读取能力声明"
+        self.stage_code = "capabilities"
         attest = self._attest()
+        # Resolve the bundled encoder before the first node picture is requested.
+        try:
+            import imageio_ffmpeg
+            self.frame_encoder = imageio_ffmpeg.get_ffmpeg_exe()
+        except (ImportError, OSError, RuntimeError):
+            self.frame_encoder = None
         self.video = NativeFrameStream(str(self.adb), self.serial)
         self.video.start()
         self.stage = "就绪"
+        self.stage_code = "ready"
         self.error = None
         return attest
 
@@ -138,13 +162,14 @@ class AndroidRuntime:
         if not (avd_home / (self.avd_name + ".ini")).is_file():
             raise RuntimeError("尚未连接战斗运行环境，请点击“设置运行环境”选择已有环境目录")
         self.stage = "启动 Android 开发环境"
+        self.stage_code = "emulator"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log = RUNTIME_HOME / "dev-emulator.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("ab") as output:
             self.process = subprocess.Popen(
                 [str(self.emulator), "-avd", self.avd_name, "-port", str(port), "-no-window", "-noaudio",
-                 "-no-snapshot", "-no-metrics", "-gpu", self.config.get("gpu", "host"), "-memory", "2048", "-cores", "2"],
+                 "-no-metrics", "-gpu", self.config.get("gpu", "host"), "-memory", "2048", "-cores", "2"],
                 env={**os.environ, "ANDROID_AVD_HOME": str(avd_home)}, stdout=output, stderr=output, creationflags=flags)
 
     def _connect_selected_device(self) -> None:
@@ -213,8 +238,10 @@ class AndroidRuntime:
         if self.command("shell", "sha256sum", directory + "/lib/arm64/libg.so").stdout.split()[0] != MANIFEST["libg_sha256"]:
             raise RuntimeError("已安装的 libg.so 与固定引擎版本不符")
         self.stage = "校验游戏资源"
+        self.stage_code = "resources"
         self._check_updated_content()
-        if self.command("shell", "sha256sum", base_apk).stdout.split()[0] != self.apk_sha256:
+        installed = self.command("shell", "sha256sum", base_apk, timeout=120).stdout.split()[0] == self.apk_sha256
+        if not installed:
             self._install_local_prepared()
             base_apk = self.command("shell", "pm", "path", package).stdout.strip().removeprefix("package:")
             directory = base_apk.rsplit("/", 1)[0]
@@ -224,7 +251,11 @@ class AndroidRuntime:
             "探针": (directory + "/lib/arm64/libcrprobe.so", PROBE_SHA256),
         }
         for label, (path, expected) in checks.items():
-            result = self.command("shell", "sha256sum", path, check=False)
+            # APK and libg were already checked above. Installing a replacement
+            # invalidates those results, so all three are then verified again.
+            if installed and label in ("APK", "libg"):
+                continue
+            result = self.command("shell", "sha256sum", path, timeout=120 if label == "APK" else 30, check=False)
             actual = result.stdout.split()[0].lower() if result.stdout.split() else ""
             if actual != expected:
                 raise RuntimeError(f"{label} 哈希不符或文件缺失：{actual or '未找到'}")
@@ -240,6 +271,7 @@ class AndroidRuntime:
         if not path.is_file() or sha256(path) != self.apk_sha256:
             raise RuntimeError("本地准备的 APK 缺失或哈希不符")
         self.stage = "安装原生战斗运行时"
+        self.stage_code = "installing"
         from .install_runtime import Device, install
         receipt = RUNTIME_HOME / ("installed-" + re.sub(r"[^a-zA-Z0-9-]", "_", self.serial) + ".json")
         install(Device(str(self.adb), self.serial), path, receipt)
@@ -247,7 +279,7 @@ class AndroidRuntime:
     def _check_updated_content(self) -> None:
         from .install_runtime import Device, apk_path, base_asset_hashes, recover_pending_downloads, resource_hashes, validate_resources
         device = Device(str(self.adb), self.serial)
-        hashes = resource_hashes(device)
+        hashes = resource_hashes(device, required_only=True)
         hashes = recover_pending_downloads(device, hashes)
         try:
             validate_resources(hashes, base_asset_hashes(device, hashes, apk_path(device)))
@@ -304,8 +336,36 @@ class AndroidRuntime:
     def frame_png(self) -> bytes:
         if not self.serial:
             raise RuntimeError("模拟器未启动")
+        # Android's PNG encoder dominates paused-node display latency. Transfer
+        # lightly compressed pixels and encode on the host, keeping a fresh capture.
+        try:
+            if not self.frame_encoder:
+                raise RuntimeError("截图编码器不可用")
+            result = subprocess.run(
+                [str(self.adb), "-s", self.serial, "exec-out", "sh", "-c", "screencap | gzip -1"],
+                capture_output=True, timeout=5, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            raw = gzip.decompress(result.stdout)
+            width, height, pixel_format = struct.unpack_from("<III", raw)
+            header = len(raw) - width * height * 4
+            if pixel_format != 1 or not (0 < width <= 8192 and 0 < height <= 8192) or header not in (12, 16):
+                raise ValueError("不支持的原生截图格式")
+            encoded = subprocess.run(
+                [self.frame_encoder, "-hide_banner", "-loglevel", "error",
+                 "-threads", "1", "-f", "rawvideo", "-pixel_format", "rgba",
+                 "-video_size", f"{width}x{height}", "-i", "pipe:0", "-frames:v", "1",
+                 "-threads", "1", "-compression_level", "6", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+                input=raw[header:], capture_output=True, timeout=5, check=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if not encoded.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("截图编码失败")
+            return encoded.stdout
+        except (OSError, ValueError, EOFError, struct.error, zlib.error, subprocess.SubprocessError, ImportError, RuntimeError):
+            # Older devices and unavailable host decoders retain the PNG path.
+            pass
         result = subprocess.run([str(self.adb), "-s", self.serial, "exec-out", "screencap", "-p"],
-                                capture_output=True, timeout=10, check=True)
+                                capture_output=True, timeout=10, check=True,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if not result.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
             raise RuntimeError("模拟器未返回有效画面")
         return result.stdout
@@ -334,7 +394,7 @@ class AndroidRuntime:
             if self.serial:
                 self.command("emu", "kill", timeout=10, check=False)
             try:
-                self.process.wait(timeout=10)
+                self.process.wait(timeout=45)
             except subprocess.TimeoutExpired:
                 self.process.terminate()
                 self.process.wait(timeout=5)

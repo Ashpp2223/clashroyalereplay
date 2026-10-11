@@ -2,9 +2,11 @@ import json
 import threading
 import unittest
 import time
+import http.client
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from bridge.controller import BattleController
 from bridge.server import BridgeServer
@@ -83,6 +85,23 @@ class ServerTest(unittest.TestCase):
             release.set()
             worker.join(2)
 
+    def test_tower_selection_is_forwarded_on_reset_and_replay(self):
+        engine=FakeEngine()
+        self.server.controller.engine=engine
+        config={'seed':41,'level':16,'tower0':159000002,'tower1':159000004}
+        for path,extra in [('/v1/reset',{}),('/v1/replay',{'actions':[],'targetTick':100})]:
+            request=Request(self.base+path,data=json.dumps({**config,**extra}).encode(),
+                headers={'Authorization':'Bearer '+'a'*64,'Content-Type':'application/json'})
+            with urlopen(request,timeout=2) as response:
+                self.assertEqual(response.status,200)
+            self.assertEqual(engine.configured_towers,(159000002,159000004))
+        request=Request(self.base+'/v1/reset',data=json.dumps({**config,'tower1':159000003}).encode(),
+            headers={'Authorization':'Bearer '+'a'*64,'Content-Type':'application/json'})
+        resets=engine.reset_count
+        with self.assertRaises(HTTPError) as rejected:urlopen(request,timeout=2)
+        self.assertEqual(rejected.exception.code,400)
+        self.assertEqual(engine.reset_count,resets)
+
     def test_frame_failure_pauses_the_battle(self):
         calls = []
         controller = self.server.controller
@@ -105,6 +124,42 @@ class ServerTest(unittest.TestCase):
             with urlopen(req,timeout=2) as response:
                 self.assertEqual(response.read(),expected)
         self.assertEqual(calls,[False,True])
+
+    def test_frame_connection_is_reused_after_cors_preflight(self):
+        self.server.controller.runtime = SimpleNamespace(frame=lambda: (b"frame", "image/jpeg"))
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
+        try:
+            connection.request("OPTIONS", "/v1/frame", headers={"Origin": "http://tauri.localhost"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 204)
+            self.assertEqual(response.getheader("Access-Control-Max-Age"), "600")
+            self.assertEqual(response.read(), b"")
+            socket = connection.sock
+            self.assertIsNotNone(socket)
+            for _ in range(3):
+                connection.request("GET", "/v1/frame", headers={"Authorization": "Bearer " + "a" * 64})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.read(), b"frame")
+                self.assertIs(connection.sock, socket)
+        finally:
+            connection.close()
+
+    def test_cancelled_frame_response_does_not_suspend_the_game(self):
+        controller = self.server.controller
+        controller.playing = True
+        controller.engine = SimpleNamespace(pause=lambda: self.fail("Cancelled response paused the game"))
+        controller.runtime = SimpleNamespace(frame=lambda: (b"frame", "image/jpeg"))
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
+        try:
+            with patch("bridge.server.BridgeRequest.end_headers", side_effect=ConnectionResetError):
+                connection.request("GET", "/v1/frame", headers={"Authorization": "Bearer " + "a" * 64})
+                with self.assertRaises(http.client.RemoteDisconnected):
+                    connection.getresponse()
+            self.assertTrue(controller.playing)
+            self.assertIsNone(controller.last_error)
+        finally:
+            connection.close()
 
     def test_single_step_expected_tick_is_checked_before_advancing(self):
         self.server.controller.engine=FakeEngine()

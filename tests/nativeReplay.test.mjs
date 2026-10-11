@@ -11,6 +11,11 @@ import {
   nativeActionsToNode,
   nearestNativeSnapshotNode,
   STANDARD_NATIVE_DECK,
+  NATIVE_CARD_CATALOG,
+  nativeDeckSpecialSlots,
+  validateNativeForms,
+  NATIVE_TOWER_CATALOG,
+  DEFAULT_NATIVE_TOWER,
   validateNativeProject
 } from "../src/domain/nativeReplay.ts";
 
@@ -24,6 +29,59 @@ const identity = {
   cropProfileId: "1080x1920"
 };
 const match = { seed: 41, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] };
+
+test('card collection sorts by elixir, then rarity, with stable ties',()=>{
+  const rarity=['common','rare','epic','legendary','champion'];
+  assert(NATIVE_CARD_CATALOG.every(card=>rarity.includes(card.rarity)));
+  for(let index=1;index<NATIVE_CARD_CATALOG.length;index++) {
+    const a=NATIVE_CARD_CATALOG[index-1],b=NATIVE_CARD_CATALOG[index];
+    assert(a.cost<b.cost || a.cost===b.cost && (rarity.indexOf(a.rarity)<rarity.indexOf(b.rarity) || a.rarity===b.rarity && a.id<b.id));
+  }
+});
+
+test('one Evolution, one Hero and one Wild slot include Champions and ignore hand order',()=>{
+  const evolutions=NATIVE_CARD_CATALOG.filter(card=>card.forms&1).slice(0,3);
+  const heroes=NATIVE_CARD_CATALOG.filter(card=>card.forms&2&&!evolutions.includes(card)).slice(0,3);
+  const champions=NATIVE_CARD_CATALOG.filter(card=>card.rarity==='champion').slice(0,2);
+  const ordinary=NATIVE_CARD_CATALOG.filter(card=>card.rarity!=='champion'&&!evolutions.includes(card)&&!heroes.includes(card));
+  for(let e=0;e<=3;e++)for(let h=0;h<=3;h++)for(let c=0;c<=2;c++) {
+    const special=[...evolutions.slice(0,e),...heroes.slice(0,h),...champions.slice(0,c)];
+    const deck=[...special,...ordinary.slice(0,8-special.length)].map(card=>card.id);
+    const forms=[...Array(e).fill(1),...Array(h).fill(2),...Array(8-e-h).fill(0)];
+    const valid=Math.max(0,e-1)+Math.max(0,h+c-1)<=1;
+    for(const [cards,modes] of [[deck,forms],[deck.toReversed(),forms.toReversed()]]) {
+      if(valid) {
+        assert.doesNotThrow(()=>validateNativeForms(cards,modes));
+        const occupied=nativeDeckSpecialSlots(cards,modes).filter(Boolean);
+        assert.equal(occupied.length,e+h+c);
+        assert.equal(new Set(occupied).size,occupied.length);
+      }else assert.throws(()=>validateNativeForms(cards,modes),/万能位/);
+    }
+  }
+  const deck=[...STANDARD_NATIVE_DECK],forms=[1,0,0,0,0,0,2,0];
+  assert.doesNotThrow(()=>validateNativeForms(deck,forms));
+  forms[0]=3;assert.throws(()=>validateNativeForms(deck,forms),/形态/);
+});
+
+test('tower selection survives saving and legacy projects keep their original default',()=>{
+  const legacy=createNativeProject(identity,match,90,'root');
+  assert.equal(validateNativeProject(JSON.parse(JSON.stringify(legacy))).match.tower0,undefined);
+  assert.equal(DEFAULT_NATIVE_TOWER,159000000);
+  for(const tower of NATIVE_TOWER_CATALOG) {
+    const config={...match,tower0:tower.id,tower1:159000004};
+    const project=createNativeProject(identity,config,90,'root');
+    const restored=validateNativeProject(JSON.parse(JSON.stringify(project)));
+    assert.equal(restored.match.tower0,tower.id);
+    assert.equal(restored.match.tower1,159000004);
+    assert(Object.isFrozen(restored.match));
+    const copy=copyNativeNode(restored,checkoutNativeNode(restored,restored.rootNodeId),'root');
+    assert.deepEqual(copy.project.match,restored.match);
+  }
+  for(const invalid of [159000003,26000000,null,true,'159000001',159000001.5]) {
+    const project=structuredClone(legacy);project.match.tower1=invalid;
+    assert.throws(()=>validateNativeProject(project),/塔楼牌/);
+  }
+});
 
 function play(tick, sequence, owner = 1) {
   return { id: `${tick}-${sequence}`, tick, sequence, owner, kind: "play-card",

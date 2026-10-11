@@ -86,15 +86,18 @@ def wait_until_ready(upstream, adb: str, serial: str, port: int, timeout: float)
     raise RuntimeError("原生引擎未在规定时间内完成内容加载，尚不能开始复盘")
 
 
-def bootstrap(adb: str, serial: str, port: int = DEVICE_PORT, timeout: float = 90) -> dict:
+def bootstrap(adb: str, serial: str, port: int = DEVICE_PORT, timeout: float = 90, *, verified: bool = False) -> dict:
     upstream = upstream_bootstrap()
-    upstream.command(adb, serial, "root")
-    upstream.command(adb, serial, "wait-for-device")
-    abi_list = upstream.shell(adb, serial, "getprop", "ro.product.cpu.abilist").stdout.strip().split(",")
-    if "arm64-v8a" not in abi_list:
-        raise RuntimeError(f"运行时不支持 ARM64 应用：{abi_list}")
-    directory = upstream.app_directory(adb, serial)
-    upstream.verify_engine(adb, serial, directory, VENDOR)
+    # AndroidRuntime has just verified root, ABI, APK, libraries and content.
+    # Standalone CLI callers still perform their own environment checks.
+    if not verified:
+        upstream.command(adb, serial, "root")
+        upstream.command(adb, serial, "wait-for-device")
+        abi_list = upstream.shell(adb, serial, "getprop", "ro.product.cpu.abilist").stdout.strip().split(",")
+        if "arm64-v8a" not in abi_list:
+            raise RuntimeError(f"运行时不支持 ARM64 应用：{abi_list}")
+        directory = upstream.app_directory(adb, serial)
+        upstream.verify_engine(adb, serial, directory, VENDOR)
     uid = upstream.shell(adb, serial, "stat", "-c", "%u", f"/data/user/0/{upstream.PACKAGE}").stdout.strip()
     if not re.fullmatch(r"\d+", uid) or int(uid) < 10000:
         raise RuntimeError("游戏 UID 无效，未修改网络规则")

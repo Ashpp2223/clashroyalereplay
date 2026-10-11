@@ -22,10 +22,11 @@ class FakeEngine:
         self.reset_count = 0
         self.pending_actions = []
 
-    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
         self.configured_decks = (deck0, deck1)
         self.configured_forms = (forms0, forms1)
         self.configured_level = level
+        self.configured_towers = (tower0,tower1)
         self.reset_count += 1
         self.snapshots.clear()
         self.state = self._state(90, ())
@@ -116,6 +117,30 @@ class ControllerTest(unittest.TestCase):
             self.controller.replay(41,[],90,snapshot_handle=snapshot['handle'],base_tick=90,
                 base_digest=base['digest'],forms1=[1]+[0]*7)
 
+    def test_special_slots_include_champions_before_resetting_battle(self):
+        from bridge.match_config import CARDS, validate_forms
+        evolutions = [card['id'] for card in CARDS if card['forms'] & 1][:3]
+        heroes = [card['id'] for card in CARDS if card['forms'] & 2 and card['id'] not in evolutions][:3]
+        champions = [card['id'] for card in CARDS if card['rarity'] == 'champion'][:2]
+        ordinary = [card['id'] for card in CARDS if card['rarity'] != 'champion' and card['id'] not in evolutions+heroes]
+        for e in range(4):
+            for h in range(4):
+                for c in range(3):
+                    special = evolutions[:e]+heroes[:h]+champions[:c]
+                    deck = special+ordinary[:8-len(special)]
+                    forms = [1]*e+[2]*h+[0]*(8-e-h)
+                    valid = max(0,e-1)+max(0,h+c-1) <= 1
+                    for cards, modes in ((deck,forms),(deck[::-1],forms[::-1])):
+                        if valid:
+                            validate_forms((cards,cards),modes,modes)
+                        else:
+                            with self.assertRaisesRegex(ValueError,'万能位'):
+                                validate_forms((cards,cards),modes,modes)
+                            resets = self.engine.reset_count
+                            with self.assertRaisesRegex(ValueError,'万能位'):
+                                self.controller.reset(41,cards,cards,modes,modes)
+                            self.assertEqual(self.engine.reset_count,resets)
+
     def test_level_is_replayed_and_scopes_live_snapshots(self):
         root=self.controller.reset(41,level=16)
         snapshot=self.controller.snapshot_create()
@@ -129,6 +154,27 @@ class ControllerTest(unittest.TestCase):
         resets=self.engine.reset_count
         for invalid in (0,17,True,16.5):
             with self.assertRaises(ValueError):self.controller.reset(41,level=invalid)
+        self.assertEqual(self.engine.reset_count,resets)
+
+    def test_towers_are_replayed_and_cannot_reuse_a_different_tower_snapshot(self):
+        from bridge.match_config import TOWER_IDS, DEFAULT_TOWER
+        for tower in TOWER_IDS:
+            root = self.controller.reset(41,level=16,tower0=tower,tower1=159000004)
+            snapshot = self.controller.snapshot_create()
+            self.assertEqual(self.engine.configured_towers,(tower,159000004))
+            self.controller.replay(41,[],90,snapshot_handle=snapshot['handle'],base_tick=90,
+                base_digest=root['digest'],level=16,tower0=tower,tower1=159000004)
+            with self.assertRaisesRegex(ValueError,'快照基点'):
+                self.controller.replay(41,[],90,snapshot_handle=snapshot['handle'],base_tick=90,
+                    base_digest=root['digest'],level=16,tower0=tower,tower1=DEFAULT_TOWER)
+            self.controller.replay(41,[],95,level=16,tower0=tower,tower1=159000004)
+            self.assertEqual(self.engine.configured_towers,(tower,159000004))
+        self.controller.replay(41,[],95)
+        self.assertEqual(self.controller.towers,(DEFAULT_TOWER,DEFAULT_TOWER))
+        self.assertEqual(self.engine.configured_towers,(None,None))
+        resets=self.engine.reset_count
+        for invalid in (159000003,26000000,True,159000001.0,'159000001',0):
+            with self.assertRaises(ValueError):self.controller.reset(41,tower1=invalid)
         self.assertEqual(self.engine.reset_count,resets)
 
     def test_invalid_initial_deal_is_rejected_before_touching_the_battle(self):
@@ -260,6 +306,25 @@ class NativeCaptureContractTest(unittest.TestCase):
         new_engine()  # Load the actual vendored decoder without connecting.
         from native_engine.protocol import State
         self.decode = State.decode
+
+    def test_tower_support_card_configuration_keeps_both_eight_card_decks(self):
+        from native_engine.engine import match_configuration
+        from bridge.match_config import TOWER_IDS, STANDARD_DECK
+        legacy=match_configuration(41)
+        for tower in TOWER_IDS:
+            config=match_configuration(41,list(STANDARD_DECK),list(STANDARD_DECK),level=16,
+                tower0=tower,tower1=159000004)
+            for owner,expected in enumerate((tower,159000004)):
+                deck=config['battle'][f'deck{owner}']
+                self.assertEqual(deck['sc'][0]['d'],expected)
+                self.assertEqual(tuple(card['d'] for card in deck['sp']),STANDARD_DECK)
+                self.assertEqual(len(deck['sc']),1)
+                self.assertEqual(config['battle']['hbd'][owner]['kt'],16)
+            self.assertEqual(config['battle']['lvlcap'],16)
+            self.assertEqual(config['battle']['cardlvlmin'],16)
+        self.assertEqual(match_configuration(41),legacy)
+        for invalid in (159000003,26000000,True,'159000001'):
+            with self.assertRaises(ValueError):match_configuration(41,tower0=invalid)
 
     def test_old_probe_capture_is_rejected_with_a_version_error(self):
         with self.assertRaisesRegex(RuntimeError, "cr-minimal.v1"):

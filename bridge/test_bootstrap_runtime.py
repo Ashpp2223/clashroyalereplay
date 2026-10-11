@@ -59,5 +59,79 @@ class CleanupTest(unittest.TestCase):
         self.assertIn(("forward", "--remove", "tcp:26789"), calls)
 
 
+class BootstrapVerificationTest(unittest.TestCase):
+    def test_runtime_reuses_immediately_completed_checks_but_cli_verifies(self):
+        for verified in (False, True):
+            upstream = SimpleNamespace(PACKAGE='game', ACTIVITY='game/activity',
+                                       command=Mock(return_value=SimpleNamespace(stdout='')),
+                                       shell=Mock(side_effect=lambda *args, **kwargs: SimpleNamespace(stdout='10001' if 'stat' in args else 'arm64-v8a')),
+                                       app_directory=Mock(return_value='/data/app/game'), verify_engine=Mock())
+            with patch.object(bootstrap, 'upstream_bootstrap', return_value=upstream), \
+                 patch.object(bootstrap, 'clear_offline_rules'), \
+                 patch.object(bootstrap, 'wait_until_ready', return_value={'contentReady':True}):
+                self.assertTrue(bootstrap.bootstrap('adb','emulator-5560',verified=verified)['contentReady'])
+            self.assertEqual(upstream.verify_engine.call_count, 0 if verified else 1)
+            self.assertTrue(any('force-stop' in call.args for call in upstream.shell.call_args_list))
+            self.assertTrue(any('forward' in call.args for call in upstream.command.call_args_list))
+
+
+class BridgeGreetingTest(unittest.TestCase):
+    def test_local_apk_hash_runs_during_startup_and_tampering_blocks_android(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from bridge import runtime
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            apk = home / 'prepared.apk'
+            apk.write_bytes(b'changed')
+            expected = '1' * 64
+            (home / 'prepared.json').write_text(json.dumps({'path':str(apk),'apkSha256':expected}))
+            with patch.object(runtime, 'RUNTIME_HOME', home), patch.object(runtime, 'sha256', return_value='2'*64) as digest:
+                android = runtime.AndroidRuntime()
+                self.assertEqual(android.apk_sha256, expected)
+                digest.assert_not_called()
+                android.adb = apk
+                with patch.object(android, '_find_arm64_device') as discover:
+                    with self.assertRaisesRegex(RuntimeError, 'APK 缺失或哈希不符'):
+                        android.start()
+                    discover.assert_not_called()
+                digest.assert_called_once_with(apk)
+
+
+    def test_verified_install_hashes_once_but_replacement_is_rechecked(self):
+        from bridge import runtime
+        apk = '/data/app/game/base.apk'
+        for installed, bad_probe in ((True, False), (False, False), (True, True)):
+            android = runtime.AndroidRuntime.__new__(runtime.AndroidRuntime)
+            android.apk_sha256 = '1'*64
+            android._check_updated_content = Mock()
+            android._install_local_prepared = Mock()
+            hashes = []
+            def command(*args, **kwargs):
+                if args[1] == 'getprop':
+                    output = 'arm64-v8a'
+                elif args[1] == 'pm':
+                    output = 'package:' + apk
+                else:
+                    path = args[-1]
+                    hashes.append(path)
+                    output = (runtime.MANIFEST['libg_sha256'] if path.endswith('/libg.so') else
+                              ('f'*64 if bad_probe else runtime.PROBE_SHA256) if path.endswith('/libcrprobe.so') else
+                              '0'*64 if not installed and hashes.count(apk)==1 else android.apk_sha256) + '  file'
+                return SimpleNamespace(stdout=output)
+            android.command = Mock(side_effect=command)
+            if bad_probe:
+                with self.assertRaisesRegex(RuntimeError, '探针 哈希不符'):
+                    android._check_installed_runtime()
+            else:
+                android._check_installed_runtime()
+            self.assertEqual(hashes.count(apk), 1 if installed else 2)
+            self.assertEqual(sum(path.endswith('/libg.so') for path in hashes), 1 if installed else 2)
+            self.assertEqual(sum(path.endswith('/libcrprobe.so') for path in hashes), 1)
+            self.assertEqual(android._install_local_prepared.call_count, 0 if installed else 1)
+            android._check_updated_content.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

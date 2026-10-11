@@ -11,6 +11,7 @@ const title='程序化桌面验收-'+Date.now();
 const existingCount=(await readdir(join(home,'saves')).catch(()=>[])).filter(name=>name.endsWith('.cr-native-replay.json')).length;
 const report={status:'running',checks:[],screenshots:[]};
 let harness;
+let frameRequest;
 const screenshot=async name=>report.screenshots.push(await harness.screenshot(name));
 const project=async()=>{
   const entries=(await readdir(join(home,'saves'))).filter(name=>name.endsWith('.cr-native-replay.json'));
@@ -21,9 +22,11 @@ const project=async()=>{
 try {
   harness=await openDesktopHarness({app,home,runtime,devUrl});
   let page=harness.page;
-  await page.evaluate(()=>localStorage.removeItem('clash-native.last-session'));
+  page.setDefaultTimeout(180000);
+  page.on('request',request=>{if(new URL(request.url()).pathname==='/v1/frame')frameRequest=request;});
+  await page.evaluate(()=>{localStorage.removeItem('clash-native.last-session');localStorage.setItem('clash-native.help-seen.v1','1');localStorage.setItem('clash-native.language','zh-CN');});
   await page.reload();
-  await page.getByRole('heading',{name:'创建复盘存档',exact:true}).waitFor({timeout:180000});
+  await page.locator('.native-home').waitFor();
   await screenshot('01-before-creation');
   assert.equal((await readdir(join(home,'saves')).catch(()=>[])).filter(name=>name.endsWith('.cr-native-replay.json')).length,existingCount);
   report.checks.push('startup-does-not-create-an-archive');
@@ -35,6 +38,8 @@ try {
   await screenshot('02-initial-configuration');
   await dialog.getByRole('button',{name:'创建存档并开始',exact:true}).click();
   await dialog.waitFor({state:'hidden',timeout:90000});
+  await page.locator('.native-surface').waitFor({timeout:180000});
+  await page.waitForFunction(()=>!document.querySelector('.playback-controls button:nth-child(3)').disabled);
   let saved=await project();assert(saved);
   assert.equal(saved.data.match.level,16);assert.equal(saved.data.match.dealMode,'ordered');
   const initial=structuredClone(saved.data.match);
@@ -73,18 +78,55 @@ try {
   assert.deepEqual(saved.data.match,initial);
   await screenshot('05-editable-child-saved');
   report.checks.push('copy-play-save-updates-one-child-without-changing-initial-configuration');
+  const waitFrame=()=>page.waitForFunction(()=>{
+    const surface=document.querySelector('.native-surface'),canvas=document.querySelector('[aria-label="原生竞技场"]');
+    return surface&&canvas&&canvas.dataset.frameRevision===surface.dataset.controlRevision&&!document.querySelectorAll('.playback-controls button')[2].disabled;
+  },{},{polling:20});
+  await page.evaluate(()=>{
+    window.frameTimings=[];
+    let lastImage;
+    const draw=CanvasRenderingContext2D.prototype.drawImage;
+    CanvasRenderingContext2D.prototype.drawImage=function(...args){
+      if(this.canvas.getAttribute('aria-label')==='原生竞技场'&&args[0]!==lastImage){
+        lastImage=args[0];window.frameTimings.push(performance.now());
+      }
+      return draw.apply(this,args);
+    };
+  });
+  await page.getByRole('button',{name:'▶ 播放',exact:true}).click();
+  await page.getByRole('button',{name:'Ⅱ 暂停',exact:true}).waitFor();
+  await page.waitForTimeout(2000);
+  const diagnosticsUrl=new URL('/v1/diagnostics',frameRequest.url()).href;
+  const headers={Authorization:(await frameRequest.allHeaders()).authorization};
+  const videoBefore=await (await page.request.get(diagnosticsUrl,{headers})).json();
+  const sampleStarted=performance.now();
+  await page.evaluate(()=>{window.frameTimings=[];});
+  await page.waitForTimeout(10000);
+  report.playback=await page.evaluate(()=>{
+    const frames=window.frameTimings;
+    const gaps=frames.slice(1).map((time,index)=>time-frames[index]).sort((a,b)=>a-b);
+    return {frames:frames.length,fps:Number(((frames.length-1)*1000/(frames.at(-1)-frames[0])).toFixed(1)),
+      medianGapMs:Math.round(gaps[Math.floor(gaps.length*.5)]??0),p95GapMs:Math.round(gaps[Math.floor(gaps.length*.95)]??0),
+      maxGapMs:Math.round(gaps.at(-1)??0)};
+  });
+  const videoAfter=await (await page.request.get(diagnosticsUrl,{headers})).json();
+  report.playback.decodedFps=Number(((videoAfter.video.framesReceived-videoBefore.video.framesReceived)*1000/(performance.now()-sampleStarted)).toFixed(1));
+  report.playback.videoError=videoAfter.video.error;
+  assert(report.playback.frames>0,'No live arena frames were drawn');
+  assert.equal(report.playback.videoError,'');
+  await page.getByRole('button',{name:'Ⅱ 暂停',exact:true}).click();
+  await waitFrame();
+  report.checks.push('live-playback-frame-timing-and-pause-confirmation');
   await harness.close();harness=null;
   harness=await openDesktopHarness({app,home,runtime,devUrl});page=harness.page;
+  await page.locator('.native-home').waitFor();
+  await page.getByRole('button',{name:'继续上次复盘',exact:true}).click();
   await page.locator('.native-notice').filter({hasText:'项目已载入'}).waitFor({timeout:180000});
   assert.equal(await page.locator('.tree-node').count(),2);
   assert((await page.locator('.tree-node.active').innerText()).includes('1 动作'));
   await screenshot('06-cold-reopen');
   report.checks.push('cold-reopen-restores-selected-child-and-locked-match');
   // Crossing a recorded card event must replay it, not create an empty future.
-  const waitFrame=()=>page.waitForFunction(()=>{
-    const surface=document.querySelector('.native-surface'),canvas=document.querySelector('[aria-label="原生竞技场"]');
-    return surface&&canvas&&canvas.dataset.frameRevision===surface.dataset.controlRevision&&!document.querySelectorAll('.playback-controls button')[2].disabled;
-  },{},{polling:20});
   await waitFrame();
   // Root restoration must keep its snapshot after reopening a saved child.
   let freshFrames=0;

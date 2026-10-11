@@ -1,3 +1,4 @@
+import { NativeUiError } from "./i18n.ts";
 import { isTauriDesktop } from "../utils/file.ts";
 import type { EngineIdentity, NativeBattleAction, NativeMatchConfig } from "../domain/nativeReplay.ts";
 
@@ -15,6 +16,7 @@ export interface CropProfile {
 
 export interface BridgeStatus {
   stage: string;
+  stageCode?: string;
   ready: boolean;
   playing: boolean;
   error: string | null;
@@ -23,7 +25,7 @@ export interface BridgeStatus {
   capabilities: Record<string, boolean> | null;
   environmentConfigured?: boolean;
   resourcesConfigured?: boolean;
-  setup?: { state: string; stage: string; downloaded: number; total: number; error: string | null };
+  setup?: { state: string; stage: string; stageCode?:string; downloaded: number; total: number; error: string | null };
 }
 
 export interface NativeObservation {
@@ -49,13 +51,16 @@ interface BridgeInfo {
 }
 
 export class NativeBridge {
-  private constructor(private info: BridgeInfo) {}
+  private info: BridgeInfo;
+  // Survive workspace unmounts so returning from Home keeps verified node frames.
+  readonly frameCache = new Map<string, Blob>();
+  private constructor(info: BridgeInfo) { this.info=info; }
 
   static async launch(): Promise<NativeBridge> {
-    if (!isTauriDesktop()) throw new Error("原生战斗需要桌面版应用");
+    if (!isTauriDesktop()) throw new NativeUiError("desktopRequired");
     const { invoke } = await import("@tauri-apps/api/core");
-    const info = await invoke<BridgeInfo>("start_native_bridge");
-    if (info.protocol !== "native-bridge.v1") throw new Error("桥接协议版本不匹配");
+    const info = await invoke<BridgeInfo>("start_native_bridge").catch(error=>{throw new NativeUiError("runtimeFailed",String(error));});
+    if (info.protocol !== "native-bridge.v1") throw new NativeUiError("protocolMismatch");
     return new NativeBridge(info);
   }
 
@@ -67,11 +72,12 @@ export class NativeBridge {
     return this.request<T>("POST", path, body);
   }
 
-  async frame(fresh = false): Promise<Blob> {
+  async frame(fresh = false, signal?: AbortSignal): Promise<Blob> {
     const response = await fetch(this.url(fresh?"/v1/frame?fresh=1":"/v1/frame"), {
-      headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store", signal: AbortSignal.timeout(8000)
+      headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store",
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000)
     });
-    if (!response.ok) throw new Error(`画面读取失败：${response.status}`);
+    if (!response.ok) throw new NativeUiError("frameFailed",String(response.status));
     return response.blob();
   }
 
@@ -80,7 +86,7 @@ export class NativeBridge {
                baseDigest?: string, match?: NativeMatchConfig): Promise<NativeObservation> {
     return this.post("/v1/replay", {
       seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest,
-      deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level, dealMode:match?.dealMode
+      deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level, dealMode:match?.dealMode, tower0:match?.tower0, tower1:match?.tower1
     });
   }
 
@@ -89,18 +95,24 @@ export class NativeBridge {
   }
 
   private async request<T>(method: string, path: string, body?: Record<string, unknown>): Promise<T> {
-    const response = await fetch(this.url(path), {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.info.token}`,
-        ...(body ? { "Content-Type": "application/json" } : {})
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      cache: "no-store",
-      signal: AbortSignal.timeout(method === "GET" ? 8000 : 600000)
-    });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || `桥接请求失败：${response.status}`);
-    return result as T;
+    const code=path === "/v1/replay" ? "replayFailed" : path.startsWith("/v1/setup") ? "runtimeFailed" : "requestFailed";
+    try {
+      const response = await fetch(this.url(path), {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.info.token}`,
+          ...(body ? { "Content-Type": "application/json" } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        cache: "no-store",
+        signal: AbortSignal.timeout(method === "GET" ? 8000 : 600000)
+      });
+      const result = await response.json();
+      if (!response.ok) throw new NativeUiError(code,result.error || String(response.status));
+      return result as T;
+    } catch(error) {
+      if(error instanceof NativeUiError)throw error;
+      throw new NativeUiError(code,String(error));
+    }
   }
 }

@@ -1,9 +1,12 @@
+import { EditHistory, structureEntry, undoStructure, isTextUndoTarget } from "./native/history.ts";
+import { restoreUndoBranch, withoutLastDraftAction, UndoRecoveryError } from "./native/undo.ts";
+import { useI18n, NativeUiError, stageText, errorText, message, type Message, HELP_KEY } from './native/i18n.ts';
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint, copyNativeNode,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
   nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK, DEFAULT_NATIVE_LEVEL,
-  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, validateNativeDeal, projectForCurrentEngine, type NativeBattleAction,
+  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, validateNativeDeal, validateNativeTower, projectForCurrentEngine, type NativeBattleAction,
   type NativeReplayProject, type NativeWorkingBranch
 } from "./domain/nativeReplay.ts";
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
@@ -23,16 +26,29 @@ const EMPTY_PROFILE: CropProfile = {
 };
 
 export default function NativeApp() {
+  const {t, language, toggle, renderMessage} = useI18n();
+  const history = useRef(new EditHistory());
+  const [historyRevision, setHistoryRevision] = useState(0);
+  const refreshHistory = () => setHistoryRevision(value => value + 1);
+  const [confirmation,setConfirmation] = useState<{message:Message;resolve:(accepted:boolean)=>void}|null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [screen, setScreen] = useState<"home" | "setup" | "workspace">("home");
+  const pendingCreation = useRef<NativeCreationInput | null>(null);
   const [bridge, setBridge] = useState<NativeBridge | null>(null);
   const [status, setStatus] = useState<BridgeStatus | null>(null);
   const [project, setProject] = useState<NativeReplayProject | null>(null);
   const [branch, setBranch] = useState<NativeWorkingBranch | null>(null);
   const [observation, setObservation] = useState<NativeObservation | null>(null);
   const [selected, setSelected] = useState<{ owner: 0 | 1; slot: number } | null>(null);
+  const selectionAudio = useRef<AudioContext | null>(null);
+  useEffect(() => () => {
+    void selectionAudio.current?.close().catch(() => undefined);
+    selectionAudio.current = null;
+  }, []);
   const [speed, setSpeed] = useState(1);
   const [scrubRoute, setScrubRoute] = useState<{ nodeId: string; maxTick: number } | null>(null);
   const [filePath, setFilePath] = useState<string | null>(null);
-  const [notice, setNotice] = useState("准备启动原生战斗环境");
+  const [notice, setNotice] = useState<Message | string>(message("choose"));
   const [busy, setBusy] = useState(false);
   const [framePending,setFramePending]=useState(false);
   const [connectionError, setConnectionError] = useState<string | null>(null);
@@ -45,6 +61,7 @@ export default function NativeApp() {
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [matchDialog,setMatchDialog]=useState<'create'|'view'|null>(null);
   const initialized = useRef(false);
+  const runtimeStartRequested = useRef(false);
   const busyRef = useRef(false);
   const controlRevision = useRef(0);
   const projectRef = useRef(project);
@@ -55,6 +72,7 @@ export default function NativeApp() {
   const connectionErrorRef = useRef<string | null>(null);
   const bridgeRef = useRef<NativeBridge | null>(null);
   const recoveryNode = useRef<string | null>(null);
+  const restoreCurrentDraft = useRef(false);
 
   const interrupt = useCallback((reason: string): void => {
     setFramePending(false);
@@ -65,12 +83,13 @@ export default function NativeApp() {
     const source = projectRef.current;
     const work = branchRef.current;
     if (source && work?.actions.length) {
-      void writeNativeJournal(source, work).catch((error) => setNotice(`草稿写入失败，请保留窗口：${String(error)}`));
+      void writeNativeJournal(source, work).catch((error) => setNotice(message("journalFailed",{detail:errorText(error,language)})));
     }
     void bridgeRef.current?.post("/v1/suspend").catch(() => undefined);
   }, []);
 
   function putProject(value: NativeReplayProject | null): void {
+    if (value?.projectId !== projectRef.current?.projectId) { history.current.clear(); refreshHistory(); }
     projectRef.current = value;
     setProject(value);
   }
@@ -96,7 +115,11 @@ export default function NativeApp() {
     controlRevision.current++;
     setBusy(true);
     try { await work(); }
-    catch (error) { setFramePending(false); setNotice(`操作失败：${String(error)}`); }
+    catch (error) {
+      setFramePending(false);
+      if(error instanceof NativeUiError && ["requestFailed","replayFailed","frameFailed"].includes(error.code))interrupt(t("interrupted"));
+      setNotice(error instanceof UndoRecoveryError ? message(error.recovered?"undoRestored":"undoFailed") : message("failed",{detail:errorText(error,language)}));
+    }
     finally { controlRevision.current++; busyRef.current = false; setBusy(false); }
   }
 
@@ -106,7 +129,7 @@ export default function NativeApp() {
       if (Number.isSafeInteger(receipt.handle) && receipt.handle > 0) {
         await client.post("/v1/snapshot-release", { handle: receipt.handle }).catch(() => undefined);
       }
-      throw new Error("节点快照与当前战斗 tick 不一致");
+      throw new Error(t("snapshotMismatch"));
     }
     const previous = snapshots.current.get(nodeId);
     if (previous) await client.post("/v1/snapshot-release", { handle: previous }).catch(() => undefined);
@@ -132,7 +155,7 @@ export default function NativeApp() {
   async function replayTo(client: NativeBridge, source: NativeReplayProject, nodeId: string,
                           actions: NativeBattleAction[], targetTick: number,
                           expectedDigest?: string): Promise<NativeObservation> {
-    setNotice(`正在恢复至 ${formatNativeTick(targetTick)}，请稍候…`);
+    setNotice(message("restoring",{time:formatNativeTick(targetTick)}));
     const path = nativePathToNode(source, nodeId);
     const targetNode = expectedDigest && path.find((node) =>
       node.finalTick === targetTick && node.stateDigest === expectedDigest);
@@ -163,38 +186,89 @@ export default function NativeApp() {
     return state;
   }
 
+  useEffect(() => { void refreshArchives(); }, []);
+
   useEffect(() => {
-    let alive = true;
-    NativeBridge.launch().then(async (client) => {
-      if (!alive) return;
-      try {
-        const previous = await reopenNativeSession();
-        if (!alive) return;
-        if (previous) {
-          putProject(previous.project);
-          putBranch(checkoutNativeNode(previous.project, previous.nodeId));
-          setFilePath(previous.path);
-          recoveryNode.current = previous.nodeId;
-        }
-      } catch (error) { setNotice(`上次项目无法读取，请重新打开：${String(error)}`); }
+    if (screen === "workspace" && observation && !busy && !localStorage.getItem(HELP_KEY)) setHelpOpen(true);
+  }, [screen, Boolean(observation), busy]);
+
+  function confirmOperation(prompt:Message):Promise<boolean> {
+    return new Promise(resolve=>setConfirmation({message:prompt,resolve}));
+  }
+
+  function finishConfirmation(accepted:boolean):void {
+    confirmation?.resolve(accepted);
+    setConfirmation(null);
+  }
+
+  function closeHelp(): void {
+    localStorage.setItem(HELP_KEY, "1");
+    setHelpOpen(false);
+  }
+
+  async function startRuntime(): Promise<void> {
+    setNotice(message("autoConnectLead"));
+    try {
+      const client = bridgeRef.current ?? await NativeBridge.launch();
       bridgeRef.current = client;
+      const latest = await client.get<BridgeStatus>("/v1/status");
+      setStatus(latest);
       setBridge(client);
-      void client.get<BridgeStatus>("/v1/status").then(async (latest) => {
-        setStatus(latest);
-        if (latest.environmentConfigured && latest.resourcesConfigured) {
-          setStatus(await client.post<BridgeStatus>("/v1/start"));
-        }
-      }).catch((error) => setNotice(String(error)));
-    }).catch((error) => { setNotice(String(error)); interrupt("战斗服务未启动，请设置运行环境后重试"); });
-    return () => { alive = false; };
-  }, []);
+      connectionErrorRef.current = null;
+      setConnectionError(null);
+      runtimeStartRequested.current = Boolean(latest.environmentConfigured && latest.resourcesConfigured) &&
+        latest.setup?.state !== "installing" && latest.setup?.state !== "importing";
+      if (runtimeStartRequested.current && !latest.ready) {
+        setStatus(await client.post<BridgeStatus>("/v1/start"));
+      }
+    } catch (error) {
+      runtimeStartRequested.current = false;
+      interrupt(errorText(error,language));
+      throw error;
+    }
+  }
+
+  async function showRuntime(): Promise<void> {
+    await exclusive(async()=>{if(connectionErrorRef.current && projectRef.current && branchRef.current) {
+        // Keep the last confirmed graph available while fixing a broken runtime.
+        setFilePath(await saveNativeProject(projectRef.current,filePath));
+      } else await preserveWorkspace();
+      setScreen("setup");await startRuntime();});
+  }
+
+  async function preserveWorkspace(): Promise<void> {
+    const source = projectRef.current;
+    let work = branchRef.current;
+    if (!source || !work) return;
+    if (connectionErrorRef.current && observationRef.current) throw new NativeUiError("interrupted");
+    if (bridgeRef.current && observationRef.current) {
+      const state = await bridgeRef.current.post<NativeObservation>("/v1/pause");
+      work = advanceNativeWork(work, state.tick);
+      putObservation(state); putBranch(work);
+      setStatus(previous => previous ? { ...previous, playing: false } : previous);
+    }
+    // Retain the draft as a journal; returning home never creates a checkpoint.
+    const path = await saveNativeProject(source, filePath);
+    if (work.actions.length) await writeNativeJournal(source, work);
+    setFilePath(path);
+    rememberNativeSession(path, work.checkedOutNodeId);
+  }
+
+  async function returnHome(): Promise<void> {
+    await exclusive(async () => {
+      await preserveWorkspace();
+      pendingCreation.current = null;
+      setSelected(null); setMatchDialog(null); setScreen("home");
+      await refreshArchives();
+    });
+  }
 
   useEffect(() => {
     if (filePath && branch?.checkedOutNodeId) rememberNativeSession(filePath, branch.checkedOutNodeId);
   }, [filePath, branch?.checkedOutNodeId]);
 
   useEffect(() => {
-    if (!bridge) return;
+    if (!bridge || screen === "home") return;
     let alive = true;
     let refreshing = false;
     const refresh = async () => {
@@ -206,17 +280,36 @@ export default function NativeApp() {
         if (!alive || busyRef.current || revision !== controlRevision.current) return;
         setStatus(latest);
         if (latest.error) { setNotice(latest.error); interrupt(latest.error); }
+        if (!latest.ready && !runtimeStartRequested.current && !connectionErrorRef.current &&
+            (screen === "setup" || pendingCreation.current || (projectRef.current && !initialized.current)) &&
+            latest.environmentConfigured && latest.resourcesConfigured &&
+            latest.setup?.state !== "installing" && latest.setup?.state !== "importing" && latest.setup?.state !== "failed") {
+          runtimeStartRequested.current = true;
+          setStatus(await bridge.post<BridgeStatus>("/v1/start"));
+          return;
+        }
+        if (latest.ready && pendingCreation.current) {
+          const input = pendingCreation.current;
+          pendingCreation.current = null;
+          await newProject(input);
+          return;
+        }
         if (latest.ready && !initialized.current && !busyRef.current && !connectionErrorRef.current) {
           initialized.current = true;
           await exclusive(async () => {
             let loaded = projectRef.current;
             if (loaded) {
               const original=loaded;
-              const upgraded=projectForCurrentEngine(loaded,latest.identity);
+              const journal = await readNativeJournal(original, restoreCurrentDraft.current);
+              if(journal?.recoveryProject) {
+                setFilePath(await saveNativeProject(journal.recoveryProject,filePath));
+              }
+              const upgraded=projectForCurrentEngine(journal?.recoveryProject ?? loaded,latest.identity);
               loaded=upgraded.project;
+              if(journal?.recoveryProject)putProject(journal.recoveryProject);
               const root = loaded.nodes[loaded.rootNodeId];
               const savedNode = loaded.nodes[recoveryNode.current ?? loaded.rootNodeId] ?? root;
-              setNotice(`正在恢复已保存节点「${savedNode.title}」，请稍候…`);
+              setNotice(message("restoringNode",{title:savedNode.title}));
               let state = await bridge.replay(loaded.match.seed, [], root.finalTick, root.stateDigest, undefined, undefined, undefined, loaded.match);
               await rememberSnapshot(bridge, root.id, root.finalTick);
               if (savedNode.id !== root.id) {
@@ -226,27 +319,28 @@ export default function NativeApp() {
                 const path=await saveNativeProject(loaded,null);
                 putProject(loaded);setFilePath(path);
               }
-              putObservation(state);
-              putBranch(checkoutNativeNode(loaded, savedNode.id));
-              recoveryNode.current = null;
-              putScrubRoute(null);
-              const journal = await readNativeJournal(original);
-              if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
+              let work=checkoutNativeNode(loaded,savedNode.id);
+              if (journal && restoreCurrentDraft.current) {
                 state = await replayTo(bridge, loaded, journal.checkedOutNodeId,
                   [...nativeActionsToNode(loaded, journal.checkedOutNodeId), ...journal.actions],
-                  journal.workingTick);
-                putObservation(state);
-                putBranch(journal);
-                if(upgraded.upgraded)await writeNativeJournal(loaded,journal);
-              } else if (journal) {
-                await clearNativeJournal(loaded.projectId);
+                  journal.workingTick, journal.recoveryDigest);
+                work={checkedOutNodeId:journal.checkedOutNodeId,workingTick:journal.workingTick,actions:journal.actions};
+                if(upgraded.upgraded || journal.recoveryProject) {
+                  if(!work.actions.length && work.workingTick===loaded.nodes[work.checkedOutNodeId].finalTick)await clearNativeJournal(loaded.projectId);
+                  else await writeNativeJournal(loaded,work);
+                }
+              } else {
+                await clearNativeJournal(original.projectId);
               }
-              setNotice("项目已载入原生战斗引擎");
+              putObservation(state);putBranch(work);putProject(loaded);
+              recoveryNode.current=null;restoreCurrentDraft.current=false;putScrubRoute(null);
+              setScreen("workspace");
+              setNotice(message("loaded"));
             } else {
-              setNotice('战斗环境已就绪，请创建复盘存档并选择初始卡组和牌序');
+              setNotice(message("ready"));
             }
           });
-          if (projectRef.current && !observationRef.current) initialized.current = false;
+          if (projectRef.current && !observationRef.current) {initialized.current=false;interrupt(t("interrupted"));}
         }
         if (latest.ready && latest.playing && !busyRef.current && observationRef.current && !connectionErrorRef.current) {
           const state = await bridge.get<NativeObservation>("/v1/observe");
@@ -260,7 +354,7 @@ export default function NativeApp() {
           }
         }
       } catch (error) {
-        if (alive) { setNotice(`连接中断：${String(error)}`); interrupt("连接中断，请恢复到已保存节点"); }
+        if (alive) { setNotice(message("failed",{detail:errorText(error,language)})); interrupt(t("interrupted")); }
       } finally {
         refreshing = false;
       }
@@ -268,21 +362,22 @@ export default function NativeApp() {
     void refresh();
     const interval = window.setInterval(() => { void refresh(); }, 100);
     return () => { alive = false; window.clearInterval(interval); };
-  }, [bridge, interrupt]);
+  }, [bridge, interrupt, screen, language, status?.ready]);
 
   async function reconnect(): Promise<void> {
     await exclusive(async () => {
+      if(projectRef.current && branchRef.current) {
+        setFilePath(await saveNativeProject(projectRef.current,filePath));
+        if(branchRef.current.actions.length)await writeNativeJournal(projectRef.current,branchRef.current);
+      }
+      restoreCurrentDraft.current = Boolean(observationRef.current || branchRef.current?.actions.length);
       recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
       snapshots.current.clear();
       initialized.current = false;
       putObservation(null);
-      const client = await NativeBridge.launch();
-      bridgeRef.current = client;
-      await client.post<BridgeStatus>("/v1/start");
-      connectionErrorRef.current = null;
-      setConnectionError(null);
-      setBridge(client);
-      setNotice("正在恢复到已保存节点，草稿将从恢复日志读取");
+      bridgeRef.current = null;
+      await startRuntime();
+      setNotice(message("recovery"));
     });
   }
 
@@ -292,23 +387,27 @@ export default function NativeApp() {
         import("@tauri-apps/plugin-dialog"), import("@tauri-apps/api/core")
       ]);
       const directory = await open({ directory: true, multiple: false,
-        title: "选择已准备好的战斗运行环境目录" });
+        title: t("chooseRuntime") });
       if (!directory || Array.isArray(directory)) return;
-      if (projectRef.current && branchRef.current?.actions.length) {
-        await writeNativeJournal(projectRef.current, branchRef.current);
+      if (projectRef.current && branchRef.current) {
+        setFilePath(await saveNativeProject(projectRef.current,filePath));
+        if(branchRef.current.actions.length)await writeNativeJournal(projectRef.current, branchRef.current);
       }
-      await invoke("configure_native_runtime", { directory });
+      await invoke("configure_native_runtime", { directory }).catch(error=>{throw new NativeUiError("runtimeFailed",String(error));});
+      restoreCurrentDraft.current = Boolean(observationRef.current || branchRef.current?.actions.length);
       recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
       snapshots.current.clear();
       initialized.current = false;
       putObservation(null);
       const client = await NativeBridge.launch();
       bridgeRef.current = client;
-      await client.post("/v1/start");
+      runtimeStartRequested.current=true;
+      setBridge(client);
+      setStatus(await client.post<BridgeStatus>("/v1/start"));
       connectionErrorRef.current = null;
       setConnectionError(null);
       setBridge(client);
-      setNotice("运行环境已设置，正在连接战斗");
+      setNotice(message("configured"));
     });
   }
 
@@ -318,28 +417,28 @@ export default function NativeApp() {
         import("@tauri-apps/plugin-dialog"), import("@tauri-apps/api/core")
       ]);
       const record = bridgeRef.current ? await bridgeRef.current.get("/v1/diagnostics").catch(() => null) : null;
-      const path = await save({ title: "保存诊断记录", defaultPath: "复盘器诊断.json",
-        filters: [{ name: "诊断记录", extensions: ["json"] }] });
+      const path = await save({ title: t("saveDiagnostics"), defaultPath: "native-replay-diagnostics.json",
+        filters: [{ name: t("diagnosticsFile"), extensions: ["json"] }] });
       if (!path) return;
       await invoke("write_project_file", { path, data: JSON.stringify(record ?? {
-        schema: "cr-native-diagnostics.v1", ready: false, error: connectionErrorRef.current ?? "战斗服务未连接"
+        schema: "cr-native-diagnostics.v1", ready: false, error: connectionErrorRef.current ?? t("disconnected")
       }, null, 2) });
-      setNotice("诊断记录已保存，未包含会话口令或项目内容");
+      setNotice(message("diagnosticsSaved"));
     });
   }
 
-  async function installEnvironment(): Promise<void> {
+  async function installEnvironment(accepted = acceptSdkTerms): Promise<void> {
     if (!bridgeRef.current) return;
     await exclusive(async () => {
-      await bridgeRef.current!.post("/v1/setup/install", { acceptLicense: acceptSdkTerms, directory: installDirectory });
-      setNotice("正在准备安卓运行环境，可以在页面查看进度");
+      await bridgeRef.current!.post("/v1/setup/install", { acceptLicense: accepted, directory: installDirectory });
+      setNotice(message("installing"));
     });
   }
 
   async function chooseInstallDirectory(): Promise<void> {
     await exclusive(async () => {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const directory = await open({ directory: true, multiple: false, title: "选择安卓环境安装目录（建议英文路径）" });
+      const directory = await open({ directory: true, multiple: false, title: t("chooseInstall") });
       if (typeof directory === "string") setInstallDirectory(directory);
     });
   }
@@ -348,11 +447,20 @@ export default function NativeApp() {
     if (!bridgeRef.current) return;
     await exclusive(async () => {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({ title: "选择本地战斗资源包", multiple: false,
-        filters: [{ name: "战斗资源包", extensions: ["zip"] }] });
+      const path = await open({ title: t("chooseResources"), multiple: false,
+        filters: [{ name: t("resourcesFile"), extensions: ["zip"] }] });
       if (!path || Array.isArray(path)) return;
+      if(projectRef.current && branchRef.current) {
+        setFilePath(await saveNativeProject(projectRef.current,filePath));
+        if(branchRef.current.actions.length)await writeNativeJournal(projectRef.current,branchRef.current);
+      }
+      restoreCurrentDraft.current = Boolean(observationRef.current || branchRef.current?.actions.length);
+      recoveryNode.current=branchRef.current?.checkedOutNodeId ?? null;
+      initialized.current=false;runtimeStartRequested.current=false;
+      connectionErrorRef.current=null;setConnectionError(null);
+      putObservation(null);snapshots.current.clear();
       await bridgeRef.current!.post("/v1/setup/resources", { path });
-      setNotice("正在校验并导入战斗资源");
+      setNotice(message("importing"));
     });
   }
 
@@ -360,12 +468,20 @@ export default function NativeApp() {
   const currentNode = project && branch ? project.nodes[branch.checkedOutNodeId] : null;
 
   async function newProject(input:NativeCreationInput):Promise<void> {
-    if(!bridge || !status?.ready)return;
+    restoreCurrentDraft.current = false;
+    if(!bridge || !status?.ready) {
+      pendingCreation.current = input;
+      setMatchDialog(null); setScreen("setup");
+      await exclusive(startRuntime);
+      return;
+    }
     await exclusive(async()=>{
-      const {title,deck0,deck1,forms0,forms1}=input;
+      const {title,deck0,deck1,forms0,forms1,tower0,tower1}=input;
       [deck0,deck1].forEach(validateNativeDeck);
       validateNativeForms(deck0,forms0);validateNativeForms(deck1,forms1);
       [deck0,deck1].forEach(validateNativeDeal);
+      [tower0,tower1].forEach(validateNativeTower);
+      if(connectionErrorRef.current && observationRef.current)throw new NativeUiError("interrupted");
       const previous=projectRef.current;
       let previousWork=branchRef.current;
       let previousState=observationRef.current;
@@ -380,25 +496,27 @@ export default function NativeApp() {
       // A fixed verified deal seed keeps native omission rules reproducible.
       const seed=41;
       let state:NativeObservation;
+      let next:NativeReplayProject;
+      let nextPath:string;
       try {
-        setNotice('正在由原生引擎校验初始牌序…');
-        state=await bridge.post<NativeObservation>('/v1/reset',{seed,deck0,deck1,forms0,forms1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'});
+        setNotice(message("validating"));
+        state=await bridge.post<NativeObservation>('/v1/reset',{seed,deck0,deck1,forms0,forms1,tower0,tower1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'});
+        next=createNativeProject(status.identity,{seed,preset:[deck0,deck1].every(deck=>JSON.stringify(deck)===JSON.stringify(STANDARD_NATIVE_DECK))&&![...forms0,...forms1].some(Boolean)?'standard':'custom',deck0,deck1,forms0,forms1,tower0,tower1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'},state.tick,state.digest,title);
+        await rememberSnapshot(bridge,next.rootNodeId,state.tick);
+        nextPath=await saveNativeProject(next,null);
       } catch(error) {
         if(previous && previousWork && previousState) {
           try {
             const restored=await bridge.replay(previous.match.seed,[...nativeActionsToNode(previous,previousWork.checkedOutNodeId),...previousWork.actions],previousWork.workingTick,previousState.digest,undefined,undefined,undefined,previous.match);
             putObservation(restored);putBranch(previousWork);
-          } catch {interrupt('新存档创建失败，原存档已保留；请恢复连接');}
+          } catch {interrupt(t("interrupted"));}
         }
         throw error;
       }
-      const next=createNativeProject(status.identity,{seed,preset:[deck0,deck1].every(deck=>JSON.stringify(deck)===JSON.stringify(STANDARD_NATIVE_DECK))&&![...forms0,...forms1].some(Boolean)?'standard':'custom',deck0,deck1,forms0,forms1,level:DEFAULT_NATIVE_LEVEL,dealMode:'ordered'},state.tick,state.digest,title);
-      await rememberSnapshot(bridge,next.rootNodeId,state.tick);
-      const nextPath=await saveNativeProject(next,null);
       putProject(next);putBranch(checkoutNativeNode(next,next.rootNodeId));putObservation(state);putScrubRoute(null);
       setFilePath(nextPath);setSelected(null);setMatchDialog(null);
-      initialized.current=true;
-      setStatus({...status,playing:false});setNotice('存档已创建；初始卡组与牌序已锁定');
+      initialized.current=true; setScreen("workspace");
+      setStatus({...status,playing:false});setNotice(message("created"));
     });
   }
 
@@ -408,7 +526,7 @@ export default function NativeApp() {
     try {
       setArchiveDirectory(await getDefaultSavesDirectory() ?? "");
       setArchives(await listReplayArchives());
-    } catch (error) { setArchiveError(String(error)); }
+    } catch (error) { setArchiveError(errorText(error,language)); }
     finally { setArchiveLoading(false); }
   }
 
@@ -427,48 +545,24 @@ export default function NativeApp() {
 
   async function changeArchiveDirectory(): Promise<void> {
     try { if (await chooseSavesDirectory()) await refreshArchives(); }
-    catch (error) { setArchiveError(String(error)); }
+    catch (error) { setArchiveError(errorText(error,language)); }
   }
 
-  async function openProject(path?: string): Promise<void> {
+  async function openProject(path?: string, continueSession = false): Promise<void> {
     await exclusive(async () => {
-      const opened = path ? await readNativeProject(path) : await openNativeProject();
+      const opened = continueSession ? await reopenNativeSession() : path ? await readNativeProject(path) : await openNativeProject();
       if (!opened) return;
-      const active = projectRef.current;
-      if (active) {
-        await saveNativeProject(active, filePath);
-        if (branchRef.current?.actions.length) await writeNativeJournal(active, branchRef.current);
-      }
-      const original=opened.project;
-      const upgrade=status?projectForCurrentEngine(opened.project,status.identity):{project:opened.project,upgraded:false};
-      opened.project=upgrade.project;
-      if (bridge && status?.ready) {
-        await releaseSnapshots(bridge);
-        const root = opened.project.nodes[opened.project.rootNodeId];
-        let state = await bridge.replay(opened.project.match.seed, [], root.finalTick, root.stateDigest, undefined, undefined, undefined, opened.project.match);
-        await rememberSnapshot(bridge, opened.project.rootNodeId, root.finalTick);
-        const journal = await readNativeJournal(original);
-        if (journal && window.confirm("发现未提交的战斗分支。恢复到上次确认的 tick 吗？")) {
-          state = await replayTo(bridge, opened.project, journal.checkedOutNodeId,
-            [...nativeActionsToNode(opened.project, journal.checkedOutNodeId), ...journal.actions],
-            journal.workingTick);
-          putBranch(journal);
-          if(upgrade.upgraded)await writeNativeJournal(opened.project,journal);
-        } else {
-          if (journal) await clearNativeJournal(opened.project.projectId);
-          putBranch(checkoutNativeNode(opened.project, opened.project.rootNodeId));
-        }
-        putObservation(state);
-        connectionErrorRef.current=null;setConnectionError(null);initialized.current=true;
-      } else {
-        putBranch(checkoutNativeNode(opened.project, opened.project.rootNodeId));
-      }
-      putProject(opened.project);
-      putScrubRoute(null);
-      setFilePath(upgrade.upgraded?await saveNativeProject(opened.project,null):opened.path);
-      setSelected(null);
-      setArchiveOpen(false);
-      setNotice(`已打开 ${opened.project.title}`);
+      await preserveWorkspace();
+      if (bridgeRef.current) await releaseSnapshots(bridgeRef.current);
+      const nodeId = "nodeId" in opened && typeof opened.nodeId === "string" ? opened.nodeId : opened.project.rootNodeId;
+      putProject(opened.project); putBranch(checkoutNativeNode(opened.project, nodeId));
+      restoreCurrentDraft.current = false;
+      recoveryNode.current = nodeId;
+      initialized.current = false;
+      putObservation(null); putScrubRoute(null);
+      setFilePath(opened.path); setSelected(null); setArchiveOpen(false);
+      setScreen("setup");
+      await startRuntime();
     });
   }
 
@@ -480,7 +574,7 @@ export default function NativeApp() {
     await exclusive(async () => {
       const path = await saveNativeProject(projectRef.current!, filePath);
       setFilePath(path);
-      setNotice(`已保存到 ${path}`);
+      setNotice(message("saved",{path}));
     });
   }
 
@@ -492,18 +586,19 @@ export default function NativeApp() {
       const work = advanceNativeWork(branchRef.current!, state.tick);
       if(status)setStatus({...status,playing:false});
       if(work.workingTick===projectRef.current!.nodes[work.checkedOutNodeId].finalTick) {
-        setFilePath(await saveNativeProject(projectRef.current!,filePath));setNotice('当前节点已保存');return;
+        setFilePath(await saveNativeProject(projectRef.current!,filePath));setNotice(message("nodeSaved"));return;
       }
       const updated=Boolean(projectRef.current!.nodes[work.checkedOutNodeId].editableCopy);
       const result = createNativeCheckpoint(projectRef.current!, work, state.digest);
       await rememberSnapshot(bridge, result.node.id, state.tick);
       const savedPath = await saveNativeProject(result.project, filePath);
+      if (!updated) { history.current.push(structureEntry(projectRef.current!, result.project, work, state.digest)); refreshHistory(); }
       putProject(result.project);
       putBranch(result.branch);
       putScrubRoute(null);
       setFilePath(savedPath);
       await clearNativeJournal(result.project.projectId);
-      setNotice(`已${updated?'更新当前节点':'保存为子节点'} · ${formatNativeTick(state.tick)}；战斗保持暂停`);
+      setNotice(message("checkpointSaved",{kind:{key:updated?"updatedNode":"savedChild"},time:formatNativeTick(state.tick)}));
     });
   }
 
@@ -534,7 +629,7 @@ export default function NativeApp() {
       putBranch(checkoutNativeNode(activeProject, nodeId));
       putScrubRoute(null);
       setSelected(null);
-      setNotice(`已恢复节点「${node.title}」`);
+      setNotice(message("restoredNode",{title:node.title}));
     });
   }
 
@@ -545,7 +640,7 @@ export default function NativeApp() {
         setStatus({ ...status, playing: false });
         let state:NativeObservation;
         try { state = await bridge.post<NativeObservation>("/v1/pause"); }
-        catch(error) { interrupt('暂停未得到引擎确认，请恢复连接'); throw error; }
+        catch(error) { interrupt(t("interrupted")); throw error; }
         putObservation(state);
         setStatus({ ...status, playing: false });
         if (branchRef.current) {
@@ -572,8 +667,8 @@ export default function NativeApp() {
     await exclusive(async () => {
       const state = await bridge.post<NativeObservation>("/v1/step", { ticks: 1,expectedTick:beforeTick });
       if(state.tick!==beforeTick+1) {
-        interrupt('单步没有停在下一帧，请恢复连接');
-        throw new Error('原生单步时间不一致');
+        interrupt(t("interrupted"));
+        throw new Error(t("stepMismatch"));
       }
       putObservation(state);
       const work = advanceNativeWork(branchRef.current!, state.tick);
@@ -581,7 +676,7 @@ export default function NativeApp() {
       putBranch(work);
       putScrubRoute(null);
       if (status) setStatus({ ...status, playing: false });
-      setNotice(`已前进一帧 · ${formatNativeTick(state.tick)}`);
+      setNotice(message("stepped",{time:formatNativeTick(state.tick)}));
     });
   }
 
@@ -594,7 +689,7 @@ export default function NativeApp() {
       const rootTick = source.nodes[source.rootNodeId].finalTick;
       if (!Number.isSafeInteger(targetTick) || targetTick < rootTick ||
           targetTick > (route?.maxTick ?? work.workingTick)) {
-        throw new Error("目标时间超出当前时间线");
+        throw new Error(t("seekInvalid"));
       }
       if (!route) {
         if (work.actions.length && targetTick < work.workingTick) {
@@ -625,7 +720,7 @@ export default function NativeApp() {
       putBranch(nextWork);
       if (status) setStatus({ ...status, playing: false });
       setSelected(null);
-      setNotice(`已跳转至 ${formatNativeTick(state.tick)}；战斗保持暂停`);
+      setNotice(message("sought",{time:formatNativeTick(state.tick)}));
     });
   }
 
@@ -643,14 +738,36 @@ export default function NativeApp() {
     const card=player?.hand.find(card=>card.slot===slot);
     if(!player||!card||player.elixir<card.cost*10000)return;
     setSelected({owner,slot});
-    setNotice(`${owner===1?'我方':'敌方'}已选择第 ${slot+1} 张手牌；点击竞技场落点`);
+    // Start audio from the click gesture so browser autoplay rules permit it.
+    try {
+      const audio=selectionAudio.current??(selectionAudio.current=new AudioContext());
+      if(audio.state==='suspended')void audio.resume().catch(()=>undefined);
+      const tone=audio.createOscillator(),volume=audio.createGain(),now=audio.currentTime;
+      tone.type='triangle';
+      tone.frequency.setValueAtTime(520,now);
+      tone.frequency.exponentialRampToValueAtTime(880,now+.075);
+      volume.gain.setValueAtTime(0,now);
+      volume.gain.linearRampToValueAtTime(.055,now+.008);
+      volume.gain.exponentialRampToValueAtTime(.001,now+.11);
+      volume.gain.linearRampToValueAtTime(0,now+.12);
+      tone.connect(volume);
+      volume.connect(audio.destination);
+      tone.onended=()=>{tone.disconnect();volume.disconnect();};
+      tone.start(now);
+      tone.stop(now+.12);
+    } catch {
+      // Audio availability must not interrupt card selection.
+    }
+    setNotice(message("selectedCard",{side:{key:owner===1?"own":"enemy"},slot:slot+1}));
   }
 
   async function copyNode():Promise<void> {
     if(!bridge || !projectRef.current || !branchRef.current)return;
     await exclusive(async()=>{
       const state=await bridge.post<NativeObservation>('/v1/pause');
-      let source=projectRef.current!,work=advanceNativeWork(branchRef.current!,state.tick);
+      const beforeProject=projectRef.current!;
+      const beforeWork=advanceNativeWork(branchRef.current!,state.tick);
+      let source=beforeProject,work=beforeWork;
       if(source.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>source.nodes[work.checkedOutNodeId].finalTick) {
         const saved=createNativeCheckpoint(source,work,state.digest);
         source=saved.project;work=saved.branch;
@@ -659,17 +776,25 @@ export default function NativeApp() {
       const copied=copyNativeNode(source,work,state.digest);
       await rememberSnapshot(bridge,copied.node.id,state.tick);
       setFilePath(await saveNativeProject(copied.project,filePath));
+      history.current.push(structureEntry(beforeProject,copied.project,beforeWork,state.digest)); refreshHistory();
       putProject(copied.project);putBranch(copied.branch);putObservation(state);putScrubRoute(null);setSelected(null);
       await clearNativeJournal(copied.project.projectId);
       if(status)setStatus({...status,playing:false});
-      setNotice('已复制为子节点；在此继续出牌，保存会更新这个节点');
+      setNotice(message("copied"));
     });
   }
 
   function moveNode(id:string,position:{x:number;y:number}):void {
-    if(!projectRef.current)return;
-    const next=updateNativeNodeMetadata(projectRef.current,id,{position});putProject(next);
-    void saveNativeProject(next,filePath).catch(error=>setNotice(`节点位置保存失败：${String(error)}`));
+    if(busyRef.current || !projectRef.current)return;
+    const source=projectRef.current;
+    const before=source.layout[id]??{x:0,y:0};
+    if(before.x===position.x && before.y===position.y)return;
+    void exclusive(async()=>{
+      const next=updateNativeNodeMetadata(source,id,{position});
+      const path=await saveNativeProject(next,filePath);
+      history.current.push({kind:"position",nodeId:id,before});refreshHistory();
+      putProject(next);setFilePath(path);
+    });
   }
 
   async function playAt(pixel: { x: number; y: number }): Promise<void> {
@@ -690,14 +815,15 @@ export default function NativeApp() {
       if (receipt.accepted && receipt.action) {
         work = appendConfirmedNativeAction(projectRef.current!, work,
           { ...receipt.action, id: crypto.randomUUID() });
+        history.current.push({kind:"action",nodeId:work.checkedOutNodeId,actionId:work.actions[work.actions.length-1].id});refreshHistory();
         putBranch(work);
         try { await writeNativeJournal(projectRef.current!, work); }
-        catch (error) { interrupt("草稿保存失败，请恢复连接后重试保存"); throw error; }
-        setNotice(`已确认 ${selected.owner === 1 ? "我方" : "敌方"}出牌；当前为新分支草稿`);
+        catch (error) { interrupt(t("interrupted")); throw error; }
+        setNotice(message("cardConfirmed",{side:{key:selected.owner===1?"own":"enemy"}}));
       } else if (work.actions.length) {
         await writeNativeJournal(projectRef.current!, work);
       } else {
-        setNotice("出牌未被引擎接受；历史未记录此动作");
+        setNotice(message("cardRejected"));
       }
       putBranch(work);
       putScrubRoute(null);
@@ -710,8 +836,15 @@ export default function NativeApp() {
   }
 
   function editNode(patch: { title?: string; note?: string }): void {
-    if (!projectRef.current || !branchRef.current) return;
-    putProject(updateNativeNodeMetadata(projectRef.current, branchRef.current.checkedOutNodeId, patch));
+    if (busyRef.current || !projectRef.current || !branchRef.current) return;
+    const id=branchRef.current.checkedOutNodeId;
+    const node=projectRef.current.nodes[id];
+    for(const field of ["title","note"] as const) {
+      if(patch[field]!==undefined && patch[field]!==node[field]) {
+        history.current.push({kind:"metadata",nodeId:id,field,before:node[field],merge:`${id}:${field}`});refreshHistory();
+      }
+    }
+    putProject(updateNativeNodeMetadata(projectRef.current,id,patch));
   }
 
   async function activateAbility(owner:0|1,entityId:number,abilityId:number):Promise<void> {
@@ -722,9 +855,11 @@ export default function NativeApp() {
       let work=advanceNativeWork(branchRef.current!,receipt.observation.tick);
       if(receipt.accepted && receipt.action) {
         work=appendConfirmedNativeAction(projectRef.current!,work,{...receipt.action,id:crypto.randomUUID()});
-        await writeNativeJournal(projectRef.current!,work);
-        setNotice('技能已由原生引擎确认，记录到当前分支');
-      } else setNotice('技能执行未得到确认，未记录动作');
+        putBranch(work);
+        history.current.push({kind:"action",nodeId:work.checkedOutNodeId,actionId:work.actions[work.actions.length-1].id});refreshHistory();
+        try { await writeNativeJournal(projectRef.current!,work); } catch(error) {interrupt(t("interrupted"));throw error;}
+        setNotice(message("abilityConfirmed"));
+      } else setNotice(message("abilityRejected"));
       putBranch(work);putScrubRoute(null);setSelected(null);
       if(status)setStatus({...status,playing:false});
     });
@@ -734,160 +869,258 @@ export default function NativeApp() {
     if (!bridge || !projectRef.current || !branchRef.current) return;
     const id = branchRef.current.checkedOutNodeId;
     const node = projectRef.current.nodes[id];
-    if (!node.parentId || !window.confirm(`删除「${node.title}」及其全部后代？`)) return;
+    if (!node.parentId || !await confirmOperation(message("confirmDelete",{title:node.title}))) return;
     const parentId = node.parentId;
     await exclusive(async () => {
       const source = projectRef.current!;
-      const removed = nativeSubtreeIds(source, id);
-      const next = deleteNativeSubtree(source, id);
-      const parent = next.nodes[parentId];
-      const state = await replayTo(bridge, next, parentId,
-        nativeActionsToNode(next, parentId), parent.finalTick, parent.stateDigest);
-      for (const removedId of removed) {
-        const handle = snapshots.current.get(removedId);
-        if (handle) {
-          snapshots.current.delete(removedId);
-          await bridge.post("/v1/snapshot-release", { handle }).catch(() => undefined);
-        }
-      }
-      putProject(next);
-      putBranch(checkoutNativeNode(next, parentId));
-      putObservation(state);
-      putScrubRoute(null);
-      setFilePath(await saveNativeProject(next, filePath));
-      await clearNativeJournal(next.projectId);
-      setNotice(`已删除 ${removed.length} 个节点`);
+      const paused = await bridge.post<NativeObservation>("/v1/pause");
+      const beforeWork = advanceNativeWork(branchRef.current!,paused.tick);
+      putBranch(beforeWork);putObservation(paused);
+      setStatus(previous=>previous?{...previous,playing:false}:previous);
+      const removed = nativeSubtreeIds(source,id);
+      const next = deleteNativeSubtree(source,id);
+      const after = checkoutNativeNode(next,parentId);
+      const state = await runUndoRestore(source,beforeWork,paused,after,next,next.nodes[parentId].stateDigest,
+        async(p)=>{await saveNativeProject(p,filePath);});
+      history.current.push(structureEntry(source,next,beforeWork,paused.digest));refreshHistory();
+      putProject(next);putBranch(after);putObservation(state);putScrubRoute(null);setSelected(null);
+      setNotice(message("deleted",{count:removed.length}));
     });
   }
 
+  async function runUndoRestore(source:NativeReplayProject, before:NativeWorkingBranch, paused:NativeObservation,
+    after:NativeWorkingBranch,target=source,digest?:string,persist?:(project:NativeReplayProject)=>Promise<void>):Promise<NativeObservation> {
+    try {
+      // Write ahead the original metadata and confirmed state. This bridges the two
+      // independently atomic project/journal files without changing project format.
+      await writeNativeJournal(source,before,{project:source,digest:paused.digest});
+      let replayCount = 0;
+      return await restoreUndoBranch(source,before,paused,after,
+        async (p,w,expected)=> {
+          const actions=[...nativeActionsToNode(p,w.checkedOutNodeId),...w.actions];
+          if(replayCount++ === 0) return replayTo(bridgeRef.current!,p,w.checkedOutNodeId,actions,w.workingTick,expected);
+          // Each replay restores and validates the immutable base snapshot again.
+          // Do not swallow a failed undo replay: rollback must keep the original branch.
+          const base=nearestNativeSnapshotNode(p,w.checkedOutNodeId,w.workingTick,new Set(snapshots.current.keys()));
+          if(base)return bridgeRef.current!.replay(p.match.seed,actions.filter(action=>action.tick>base.finalTick),w.workingTick,
+            expected,snapshots.current.get(base.id),base.finalTick,base.stateDigest,p.match);
+          await releaseSnapshots(bridgeRef.current!);
+          return bridgeRef.current!.replay(p.match.seed,actions,w.workingTick,expected,undefined,undefined,undefined,p.match);
+        },async(p,w)=>{
+          if(!w.actions.length && w.workingTick===p.nodes[w.checkedOutNodeId].finalTick)await clearNativeJournal(p.projectId);
+          else await writeNativeJournal(p,w);
+        },target,digest,persist);
+    } catch(error) {
+      if(error instanceof UndoRecoveryError && !error.recovered) interrupt(t("undoFailed"));
+      throw error;
+    }
+  }
+
+  async function undo():Promise<void> {
+    if(screen!=="workspace" || busyRef.current || !projectRef.current || !branchRef.current || connectionErrorRef.current)return;
+    const entry=history.current.peek();if(!entry)return;
+    history.current.endText();
+    await exclusive(async()=>{
+      const source=projectRef.current!;
+      if(entry.kind==="metadata" || entry.kind==="position") {
+        if(bridge && branchRef.current) {
+          const state=await bridge.post<NativeObservation>("/v1/pause");
+          const work=advanceNativeWork(branchRef.current,state.tick);
+          putObservation(state);putBranch(work);setStatus(previous=>previous?{...previous,playing:false}:previous);
+          if(work.actions.length)await writeNativeJournal(source,work);
+        }
+        if(!source.nodes[entry.nodeId])throw new Error(t("undoBlocked"));
+        const next=updateNativeNodeMetadata(source,entry.nodeId,entry.kind==="position"?{position:entry.before}:{[entry.field]:entry.before});
+        setFilePath(await saveNativeProject(next,filePath));
+        putProject(next);
+      } else {
+        if(!bridge || !observationRef.current) return;
+        let target=source,after:NativeWorkingBranch,digest:string|undefined;
+        try {
+          if(entry.kind==="action") {
+            if(entry.nodeId!==branchRef.current!.checkedOutNodeId || scrubRouteRef.current)throw new Error('UNDO_SAVED_HISTORY');
+            after=withoutLastDraftAction(source,branchRef.current!,entry.actionId);
+          } else {
+            target=undoStructure(source,entry);
+            after=entry.branch;digest=entry.digest;
+          }
+        } catch {history.current.pop();refreshHistory();setNotice(message("undoBlocked"));return;}
+        let paused:NativeObservation;
+        try {paused=await bridge.post<NativeObservation>("/v1/pause");} catch(error) {interrupt(t("interrupted"));throw error;}
+        const before=advanceNativeWork(branchRef.current!,paused.tick);
+        putBranch(before);putObservation(paused);setStatus(previous=>previous?{...previous,playing:false}:previous);
+        if(entry.kind==="action")after={...after,workingTick:paused.tick};
+        const state=await runUndoRestore(source,before,paused,after,target,digest,
+          entry.kind==="structure"?async(p)=>{await saveNativeProject(p,filePath);}:undefined);
+        putProject(target);putBranch(after);putObservation(state);putScrubRoute(null);setSelected(null);
+      }
+      history.current.pop();refreshHistory();setNotice(message("undone"));
+    });
+  }
+
+  useEffect(()=>{
+    const keydown=(event:KeyboardEvent)=>{
+      if((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==="z" && !event.shiftKey && !isTextUndoTarget(event.target) && screen==="workspace" && !helpOpen && !matchDialog && !archiveOpen && !confirmation) {
+        event.preventDefault();void undo();
+      }
+    };
+    window.addEventListener("keydown",keydown);
+    return ()=>window.removeEventListener("keydown",keydown);
+  });
+
   const ownElixir = observation?.players.find((player) => player.owner === 1)?.elixir;
   const enemyElixir = observation?.players.find((player) => player.owner === 0)?.elixir;
-  const ready = Boolean(status?.ready && observation && !connectionError);
-  const nodeFrameKey = project && currentNode && observation && !status?.playing &&
-    observation.tick===currentNode.finalTick && observation.digest===currentNode.stateDigest
-    ? JSON.stringify([project.projectId,project.engine,currentNode.finalTick,currentNode.stateDigest,profile.id]) : null;
+  const ready = Boolean(screen === "workspace" && status?.ready && observation && !connectionError);
+  // A saved checkpoint and its paused draft share the same verified picture.
+  // Tick/digest changes still force a fresh capture before controls are enabled.
+  const nodeFrameKey = project && observation && !status?.playing
+    ? JSON.stringify([project.projectId,project.engine,observation.tick,observation.digest,profile.id]) : null;
+  const connectingRuntime = Boolean(runtimeStartRequested.current && !status?.ready && !connectionError);
   const settingUp = status?.setup?.state === "installing" || status?.setup?.state === "importing";
+
+  const archiveContents = <>
+      <div className="archive-tools"><button onClick={()=>{void refreshArchives();}} disabled={archiveLoading}>{t("refresh")}</button><button onClick={()=>{void changeArchiveDirectory();}} disabled={busy}>{t("folder")}</button><button onClick={()=>{void openProject();}} disabled={busy}>{t("otherFile")}</button></div>
+      <div className="archive-directory">{archiveDirectory}</div>
+      {archiveError && <p role="alert">{archiveError}</p>}
+      <div className="archive-list">{archiveLoading ? <p>{t("loading")}</p> : !archives.length ? <p>{t("empty")}</p> : archives.map(entry=><article className="archive-entry" key={entry.path}><div><strong>{entry.title}</strong><span>{entry.nodeCount} {t("nodes")} · {entry.updatedAt ? new Date(entry.updatedAt).toLocaleString(language) : "—"}</span><small>{entry.name}</small></div><button disabled={busy} onClick={()=>{void openProject(entry.path);}}>{t("open")}</button></article>)}</div>
+  </>;
 
   return <div className="native-app">
     <header className="native-header">
-      <div className="native-brand"><span className="native-brand-icon">♛</span>
-        <div><strong>皇室战争 · 原生战斗复盘</strong><small>时间线与平行分支</small></div></div>
+      <div className="native-brand"><img className="native-brand-icon" src="/app-icon.png" alt="" />
+        <div><strong>{t("brand")}</strong><small>{t("subtitle")}</small></div></div>
       <div className="native-header-actions">
-        <button onClick={()=>setMatchDialog('create')} disabled={busy}>新建存档</button>
-        <button onClick={() => { void showArchives(); }} disabled={busy}>存档</button>
-        <button onClick={()=>setMatchDialog('view')} disabled={!project||busy}>初始配置（只读）</button>
-        <button onClick={() => { void openProject(); }} disabled={busy}>打开项目</button>
-        <button onClick={() => { void configureRuntime(); }} disabled={busy}>设置运行环境</button>
-        <button onClick={() => { void exportDiagnostics(); }} disabled={busy}>导出诊断</button>
-        <button className="primary" onClick={() => { void saveProject(); }} disabled={!project || busy}>保存</button>
+        {screen === "workspace" && <button title="Ctrl+Z" onClick={()=>{void undo();}} disabled={busy || !ready || !history.current.peek()} data-history-revision={historyRevision}>{t("undo")}</button>}
+        <button onClick={toggle} aria-label="Language">{language === "zh-CN" ? "English" : "简体中文"}</button>
+        <button onClick={()=>setHelpOpen(true)}>{t("help")}</button>
+        {screen !== "home" && <button onClick={()=>{void returnHome();}} disabled={busy}>{t("home")}</button>}
+        {screen === "home" && <button onClick={()=>{void openProject(undefined, true);}} disabled={busy || !localStorage.getItem("clash-native.last-session")}>{t("continue")}</button>}
+        <button onClick={()=>setMatchDialog('create')} disabled={busy}>{t("new")}</button>
+        {screen === "workspace" && <button onClick={() => { void showArchives(); }} disabled={busy}>{t("archives")}</button>}
+        {screen === "workspace" && <button onClick={()=>setMatchDialog('view')} disabled={!project||busy}>{t("config")}</button>}
+        {screen !== "setup" && <button onClick={() => { void showRuntime(); }} disabled={busy}>{t("runtime")}</button>}
+        {screen === "workspace" && <button className="primary" onClick={() => { void saveProject(); }} disabled={!project || busy}>{t("save")}</button>}
       </div>
     </header>
-    <div className="native-workspace">
+    {screen === "home" ? <main className="native-home">
+      <h1>{t("archiveTitle")}</h1><p>{t("homeLead")}</p>
+      {archiveContents}
+      <div className="native-notice" role="status">{renderMessage(notice)}</div>
+    </main> : <div className={`native-workspace${screen === "setup" ? " native-setup" : ""}`}>
       <aside className="native-sidebar">
-        <div className="panel-heading"><span>时间分支</span><span>{project ? Object.keys(project.nodes).length : 0} 节点</span></div>
-        <div className="native-project-title">{project ? <input aria-label="战斗名称" value={project.title}
-          onChange={(event) => putProject({ ...project, title: event.target.value, updatedAt: new Date().toISOString() })} /> : "等待战斗启动"}</div>
+        <div className="panel-heading"><span>{t("branch")}</span><span>{project ? Object.keys(project.nodes).length : 0} {t("nodes")}</span></div>
+        <div className="native-project-title">{project ? <input aria-label={t("projectName")} value={project.title} disabled={!ready||busy}
+          onChange={(event) => putProject({ ...project, title: event.target.value, updatedAt: new Date().toISOString() })} /> : t("waiting")}</div>
         {project && branch ? <NativeNodeTree project={project} selectedId={branch.checkedOutNodeId} disabled={!ready||busy} onSelect={id=>{void checkout(id);}} onMove={moveNode}/> : <div className="native-tree"/>}
-        <button className="wide-button" onClick={()=>{void copyNode();}} disabled={!ready||busy}>＋ 从当前节点创建子节点</button>
+        <button className="wide-button" onClick={()=>{void copyNode();}} disabled={!ready||busy}>{t("copy")}</button>
         <button className="wide-button" onClick={() => { void checkpoint(); }}
           disabled={!ready || busy || !branch || !currentNode || branch.workingTick <= currentNode.finalTick}>
-          保存当前节点
+          {t("checkpoint")}
         </button>
-        {branch && branch.actions.length > 0 && <div className="draft-note">● 新分支草稿 · {branch.actions.length} 个已确认动作</div>}
+        {branch && branch.actions.length > 0 && <div className="draft-note">● {t("draft")} · {branch.actions.length} {t("confirmedActions")}</div>}
       </aside>
       <main className="native-main">
         <div className="battle-toolbar">
-          <div className="battle-title"><strong>原生战斗</strong><span>{status?.stage ?? "连接桥接服务"}</span></div>
+          <div className="battle-title"><strong>{t("battle")}</strong><span>{stageText(language,status?.stageCode,status?.stage ?? t("bridge"))}</span></div>
           <div className="battle-clock">{formatNativeTick(observation?.tick ?? 0)}</div>
-          <div className="battle-elixir" aria-label="双方圣水结构化读数">
-            敌 {enemyElixir === undefined ? "—" : (enemyElixir / 10000).toFixed(1)}
+          <div className="battle-elixir" aria-label={t("elixirReading")}>
+            {t("enemy")} {enemyElixir === undefined ? "—" : (enemyElixir / 10000).toFixed(1)}
             <span>·</span>
-            我 {ownElixir === undefined ? "—" : (ownElixir / 10000).toFixed(1)}
+            {t("own")} {ownElixir === undefined ? "—" : (ownElixir / 10000).toFixed(1)}
           </div>
         </div>
         <div className="ability-toolbar">{observation?.players.flatMap(player=>(player.runtime?.abilityRuntime??[]).map(ability=>{
           const entity=ability.championEntityKeys.find(key=>key);
           return <button key={`${player.owner}-${ability.controllerSlot}`} disabled={!ready || busy || !entity || !ability.available || ability.remainingCooldownMs>0}
-            onClick={()=>{if(entity)void activateAbility(player.owner as 0|1,entity.secondaryIndex,ability.actionDataGlobalId);}}>{player.owner===1?'我方':'敌方'} · {NATIVE_CARD_CATALOG.find(card=>card.abilityNames.includes(ability.actionDataName))?.name??'技能'}{ability.remainingCooldownMs>0?` · ${(ability.remainingCooldownMs/1000).toFixed(1)}s`:''}</button>;
+            onClick={()=>{if(entity)void activateAbility(player.owner as 0|1,entity.secondaryIndex,ability.actionDataGlobalId);}}>{player.owner===1?t("own"):t("enemy")} · {NATIVE_CARD_CATALOG.find(card=>card.abilityNames.includes(ability.actionDataName))?.name??t("ability")}{ability.remainingCooldownMs>0?` · ${(ability.remainingCooldownMs/1000).toFixed(1)}s`:''}</button>;
         }))}</div>
-        <div className="battle-stage">{!project && status?.ready ? <section className="first-run-panel"><div className="first-run-symbol">♛</div><h2>创建复盘存档</h2><p>在创建时选择初始卡组、觉醒和精英形态，并排列起手牌与待抽牌。创建后初始配置固定。</p><button className="setup-primary" onClick={()=>setMatchDialog('create')}>新建存档</button></section> : !observation ? <section className="first-run-panel">
-          <div className="first-run-symbol">♛</div>
-          <h2>{status?.environmentConfigured && status?.resourcesConfigured ? "连接战斗环境" : "首次使用 · 准备战斗环境"}</h2>
-          <p>画面与战斗规则由原生游戏提供。没有模拟器的电脑，可在这里安装所需的最小安卓环境。</p>
-          <div className="setup-step"><strong>1 · 安卓运行环境</strong>
-            <span>{status?.environmentConfigured ? "已有环境已识别" : "首次下载约 1.9 GB，需要至少 28 GB 可用空间"}</span>
-            {!status?.environmentConfigured && <>
-              <label className="sdk-terms"><input type="checkbox" checked={acceptSdkTerms} onChange={(event) => setAcceptSdkTerms(event.target.checked)} />
-                <span>我已阅读并接受 <a href="https://developer.android.com/studio/terms" target="_blank" rel="noreferrer">Android SDK 使用条款</a></span></label>
-              <button className="setup-primary" onClick={() => { void installEnvironment(); }} disabled={!acceptSdkTerms || busy || settingUp}>安装安卓运行环境</button>
-              <button onClick={() => { void chooseInstallDirectory(); }} disabled={busy || settingUp}>更改安装位置</button>
-              <span>{installDirectory ?? "默认安装在当前用户的数据目录"}</span>
-            </>}
-          </div>
-          <div className="setup-step"><strong>2 · 本地战斗资源</strong>
-            <span>{status?.resourcesConfigured ? "战斗资源已连接" : "选择复盘器战斗资源包；游戏文件不会随安装程序分发"}</span>
-            <button onClick={() => { void importResources(); }} disabled={!status?.environmentConfigured || settingUp || busy}>{status?.resourcesConfigured?'更新战斗资源包':'导入战斗资源包'}</button>
-          </div>
-          {settingUp && <div className="setup-progress"><span>{status?.setup?.stage}</span>
+        <div className="battle-stage">{(!observation || screen === "setup") ? <section className="first-run-panel">
+          <div className={`first-run-symbol${status?.ready || connectionError || status?.setup?.error ? "" : " is-connecting"}`}>{status?.ready ? "✓" : <img src="/app-icon.png" alt="" />}</div>
+          <h2>{status?.ready ? t("runtimeReady") : t("autoConnecting")}</h2>
+          <p>{status?.ready ? t("environmentReadyLead") : t("autoConnectLead")}</p>
+          <ol className="connection-steps" aria-label={t("connection")}>
+            <li data-complete={Boolean(status?.environmentConfigured)}><span>{status?.environmentConfigured ? "✓" : "1"}</span><div><strong>{t("android")}</strong><small>{status?.environmentConfigured ? t("detected") : t("download")}</small></div></li>
+            <li data-complete={Boolean(status?.resourcesConfigured)}><span>{status?.resourcesConfigured ? "✓" : "2"}</span><div><strong>{t("resources")}</strong><small>{status?.resourcesConfigured ? t("resourcesReady") : t("resourcesLead")}</small></div></li>
+            <li data-complete={Boolean(status?.ready)} aria-current={!status?.ready && status?.environmentConfigured && status?.resourcesConfigured ? "step" : undefined}><span>{status?.ready ? "✓" : "3"}</span><div><strong>{t("connection")}</strong><small role="status">{status?.ready ? t("runtimeReady") : stageText(language,status?.stageCode,status?.stage ?? t("bridge"))}</small></div></li>
+          </ol>
+          {status && !status.environmentConfigured && !settingUp && <div className="setup-required">
+            <label className="sdk-terms"><input type="checkbox" checked={acceptSdkTerms} disabled={busy} onChange={(event) => {setAcceptSdkTerms(event.target.checked);if(event.target.checked)void installEnvironment(true);}} />
+              <span>{t("acceptAutoInstall")} <a href="https://developer.android.com/studio/terms" target="_blank" rel="noreferrer">{t("sdkTerms")}</a></span></label>
+            {acceptSdkTerms && status.setup?.state === "failed" && <button className="setup-primary" onClick={() => { void installEnvironment(); }} disabled={busy}>{t("retry")}</button>}
+          </div>}
+          {status?.environmentConfigured && !status?.resourcesConfigured && !settingUp && <div className="setup-actions">
+            <button className="setup-primary" onClick={() => { void importResources(); }} disabled={busy}>{t("importResources")}</button>
+          </div>}
+          {settingUp && <div className="setup-progress" role="status"><span>{stageText(language,status?.setup?.stageCode,status?.setup?.stage)}</span>
             {status?.setup?.state === "installing" && <progress max={status.setup.total} value={status.setup.downloaded} />}
           </div>}
-          {status?.setup?.error && <p className="setup-error">{status.setup.error}</p>}
-          <div className="setup-actions"><button onClick={() => { void configureRuntime(); }} disabled={busy || settingUp}>选择已有运行环境</button>
-            <button className="setup-primary" onClick={() => { void reconnect(); }} disabled={busy || settingUp || !status?.environmentConfigured || !status?.resourcesConfigured}>开始连接</button></div>
-          <small>若电脑未启用虚拟化，安装向导会给出具体检查结果。</small>
+          {(status?.setup?.error || connectionError) && <p className="setup-error" role="alert">{t("runtimeFailed")}<small>{status?.setup?.error ?? connectionError}</small></p>}
+          {connectionError && <div className="setup-actions"><button className="setup-primary" onClick={() => { void reconnect(); }} disabled={busy || settingUp}>{t("retry")}</button></div>}
+          {status?.ready && !project && !pendingCreation.current && <div className="setup-actions"><button className="setup-primary" onClick={()=>setMatchDialog("create")} disabled={busy}>{t("new")}</button></div>}
+          {status?.ready && initialized.current && observation && <div className="setup-actions"><button className="setup-primary" onClick={()=>setScreen("workspace")} disabled={busy}>{t("battle")}</button></div>}
+          <details className="setup-advanced"><summary>{t("advancedOptions")}</summary>
+            <div className="setup-actions"><button onClick={() => { void configureRuntime(); }} disabled={busy || settingUp || connectingRuntime}>{t("existingRuntime")}</button>
+              {status?.resourcesConfigured && <button onClick={() => { void importResources(); }} disabled={!status?.environmentConfigured || settingUp || busy || connectingRuntime}>{t("updateResources")}</button>}
+              <button onClick={()=>{void exportDiagnostics();}} disabled={busy}>{t("diagnostics")}</button>
+              {!status?.environmentConfigured && <button onClick={() => { void chooseInstallDirectory(); }} disabled={busy || settingUp}>{t("installLocation")}</button>}
+            </div>
+            {!status?.environmentConfigured && <small>{installDirectory ?? t("defaultLocation")}</small>}
+            <p>{t("virtualization")}</p>
+          </details>
         </section> : <NativeSurface bridge={bridge} ready={ready} profile={profile}
           selected={selected} observation={observation} disabled={busy} paused={!status?.playing} framePending={framePending} frameRevision={controlRevision.current} frameCacheKey={nodeFrameKey} onFrameRendered={frameRendered} onSelectCard={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
-        {connectionError && <div className="native-recovery" role="alert">
-          <span>{connectionError}</span><button onClick={() => { void reconnect(); }} disabled={busy}>恢复连接</button>
+        {connectionError && observation && screen === "workspace" && <div className="native-recovery" role="alert">
+          <span>{t("interrupted")}<small>{connectionError}</small></span><button onClick={() => { void reconnect(); }} disabled={busy}>{t("reconnect")}</button>
         </div>}
         <div className="playback-controls">
           <button onClick={() => { void seek(Math.max(project?.nodes[project.rootNodeId].finalTick ?? 90,
-            (observation?.tick ?? 91) - 1)); }} disabled={!ready || busy || framePending || Boolean(status?.playing)} title={status?.playing?'请先暂停，再逐帧后退':'后退一帧（0.05秒）'}>◀│ 后退一步</button>
+            (observation?.tick ?? 91) - 1)); }} disabled={!ready || busy || framePending || Boolean(status?.playing)} title={status?.playing?t("pauseFirst"):t("backFrame")}>{t("back")}</button>
           <button className="play-button" onClick={() => { void togglePlay(); }} disabled={!ready || busy}>
-            {status?.playing ? "Ⅱ 暂停" : "▶ 播放"}</button>
-          <button onClick={() => { void stepForward(); }} disabled={!ready || busy || framePending || Boolean(status?.playing) || Boolean(observation?.finalized)} title={status?.playing?'请先暂停，再逐帧前进':'前进一帧（0.05秒）'}>前进一步 │▶</button>
-          <select aria-label="播放速度" value={speed} onChange={(event) => { void changeSpeed(Number(event.target.value)); }}
+            {status?.playing ? t("pause") : t("play")}</button>
+          <button onClick={() => { void stepForward(); }} disabled={!ready || busy || framePending || Boolean(status?.playing) || Boolean(observation?.finalized)} title={status?.playing?t("pauseFirst"):t("nextFrame")}>{t("forward")}</button>
+          <select aria-label={t("speed")} value={speed} onChange={(event) => { void changeSpeed(Number(event.target.value)); }}
             disabled={!ready || busy}>{[0.25, 0.5, 1, 2, 4].map((value) =>
               <option value={value} key={value}>{value}×</option>)}</select>
         </div>
-        <input className="timeline-scrubber" aria-label="时间跳转" type="range"
+        <input className="timeline-scrubber" aria-label={t("seek")} type="range"
           min={project?.nodes[project.rootNodeId].finalTick ?? 90}
           max={Math.max(91, scrubRoute?.maxTick ?? branch?.workingTick ?? 91)}
           value={observation?.tick ?? 90} disabled={!ready || busy || framePending}
           onChange={(event) => { void seek(Number(event.target.value)); }} />
-        <div className="native-notice" role="status">{notice}</div>
+        <div className="native-notice" role="status">{renderMessage(notice)}</div>
       </main>
       <aside className="native-inspector">
-        <div className="panel-heading"><span>节点详情</span></div>
+        <div className="panel-heading"><span>{t("details")}</span></div>
         {currentNode ? <>
-          <label>标题<input value={currentNode.title} onChange={(event) => editNode({ title: event.target.value })} /></label>
-          <div className="inspector-stat"><span>时间</span><strong>{formatNativeTick(currentNode.finalTick)}</strong></div>
-          <div className="inspector-stat"><span>本段动作</span><strong>{currentNode.actionsFromParent.length}</strong></div>
-          <label>备注<textarea rows={8} value={currentNode.note}
-            onChange={(event) => editNode({ note: event.target.value })} placeholder="记录这一条时间线的判断…" /></label>
-          <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode.parentId || busy}>删除此分支及后代</button>
-        </> : <p className="inspector-empty">战斗就绪后会显示节点信息。</p>}
-        <div className="runtime-card"><strong>战斗连接</strong>
-          <span>{status?.stage ?? "未连接"}</span>
-          {status?.error && <p>{status.error}</p>}
-          <small>{project?.match.preset==='custom'?'自定义卡组':'标准卡组'} · {project?.match.level?`${project.match.level} 级`:'旧存档等级'} · 原生战斗</small>
+          <label>{t("title")}<input disabled={!ready||busy} onBlur={()=>history.current.endText()} value={currentNode.title} onChange={(event) => editNode({ title: event.target.value })} /></label>
+          <div className="inspector-stat"><span>{t("time")}</span><strong>{formatNativeTick(currentNode.finalTick)}</strong></div>
+          <div className="inspector-stat"><span>{t("segmentActions")}</span><strong>{currentNode.actionsFromParent.length}</strong></div>
+          <label>{t("note")}<textarea disabled={!ready||busy} onBlur={()=>history.current.endText()} rows={8} value={currentNode.note}
+            onChange={(event) => editNode({ note: event.target.value })} placeholder={t("noteHint")} /></label>
+          <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode.parentId || busy}>{t("delete")}</button>
+        </> : <p className="inspector-empty">{t("nodeEmpty")}</p>}
+        <div className="runtime-card"><strong>{t("connection")}</strong>
+          <span>{stageText(language,status?.stageCode,status?.stage ?? t("disconnected"))}</span>
+          {status?.error && <p>{t("runtimeFailed")}<small>{status.error}</small></p>}
+          <small>{project?.match.preset==='custom'?t("customDeck"):t("standardDeck")} · {project?.match.level?t("levelValue",{level:project.match.level}):t("originalLevel")} · {t("battle")}</small>
         </div>
       </aside>
     </div>
+    }
     {archiveOpen && <div className="native-dialog-backdrop"><section className="native-dialog archive-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-heading">
-      <div className="dialog-heading"><h2 id="archive-heading">复盘存档</h2><button onClick={() => setArchiveOpen(false)} disabled={busy}>关闭</button></div>
-      <p>选择已保存的原生战斗项目。第一版存档保留在列表中，需要用旧版记谱器打开。</p>
-      <div className="archive-tools"><button onClick={() => { void refreshArchives(); }} disabled={archiveLoading || busy}>刷新</button>
-        <button onClick={() => { void changeArchiveDirectory(); }} disabled={archiveLoading || busy}>选择存档目录</button>
-        <button onClick={() => { void openProject(); }} disabled={busy}>打开其他文件</button></div>
-      <div className="archive-directory">{archiveDirectory}</div>
-      {archiveError && <p role="alert" className="setup-error">{archiveError}</p>}
-      <div className="archive-list">{archiveLoading ? <p>正在读取存档…</p> : !archives.length ? <p>这个目录还没有复盘存档。新建战斗并保存后，会显示在这里。</p> : archives.map(entry => <article className="archive-entry" key={entry.path}>
-        <div><strong>{entry.title}</strong><span>{entry.kind === "native" ? "原生战斗" : entry.kind === "legacy" ? "第一版存档" : "无法读取"} · {entry.nodeCount} 节点{entry.updatedAt ? ` · ${new Date(entry.updatedAt).toLocaleString()}` : ""}</span>
-          <small>{entry.name}</small>{entry.error && <small>{entry.error}</small>}</div>
-        <button disabled={busy || entry.kind !== "native"} onClick={() => { void openProject(entry.path); }}>{entry.kind === "native" ? "打开" : entry.kind === "legacy" ? "请使用旧版" : "格式无效"}</button>
-      </article>)}</div>
+      <div className="dialog-heading"><h2 id="archive-heading">{t("archiveTitle")}</h2><button onClick={() => setArchiveOpen(false)} disabled={busy}>{t("close")}</button></div>
+      <p>{t("nativeOnly")}</p>
+      {archiveContents}
     </section></div>}
-    {matchDialog && <NativeMatchDialog match={matchDialog==='view'?project?.match:undefined} busy={busy} ready={Boolean(status?.ready && !connectionError)} onClose={()=>setMatchDialog(null)} onCreate={input=>{void newProject(input);}}/>}
+    {confirmation && <div className="native-dialog-backdrop"><section className="native-dialog confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-heading">
+      <h2 id="confirm-heading">{t("confirm")}</h2><p>{renderMessage(confirmation.message)}</p>
+      <div className="setup-actions"><button autoFocus onClick={()=>finishConfirmation(false)}>{t("cancel")}</button><button className="setup-primary" onClick={()=>finishConfirmation(true)}>{t("confirm")}</button></div>
+    </section></div>}
+    {helpOpen && <div className="native-dialog-backdrop"><section className="native-dialog help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-heading">
+      <div className="dialog-heading"><h2 id="help-heading">{t("help")}</h2><button onClick={toggle}>{language === "zh-CN" ? "English" : "简体中文"}</button><button onClick={closeHelp}>{t("close")}</button></div>
+      <p>{t("helpLead")}</p>
+      {(["helpStart", "helpDeck", "helpBattle", "helpTime", "helpNodes", "helpUndo", "helpSave", "helpKeys", "helpRuntime"] as const).map(key=><section key={key}><h3>{t(key)}</h3><p>{t(`${key}Body`)}</p></section>)}
+    </section></div>}
+    {matchDialog && <NativeMatchDialog match={matchDialog==='view'?project?.match:undefined} busy={busy} ready={true} onClose={()=>setMatchDialog(null)} onCreate={input=>{void newProject(input);}}/>}
   </div>;
 }

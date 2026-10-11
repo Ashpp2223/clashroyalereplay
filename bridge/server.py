@@ -49,6 +49,9 @@ class BridgeServer(ThreadingHTTPServer):
 
 class BridgeRequest(BaseHTTPRequestHandler):
     server: BridgeServer
+    protocol_version = "HTTP/1.1"
+    # Reuse the connection without delayed ACK stalls between headers and pixels.
+    disable_nagle_algorithm = True
 
     def log_message(self, _format: str, *_args) -> None:
         return  # Avoid printing credentials or local paths from requests.
@@ -69,13 +72,18 @@ class BridgeRequest(BaseHTTPRequestHandler):
 
     def _send(self, status: int, body: dict | bytes, content_type: str = "application/json") -> None:
         payload = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self._cors()
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(status)
+            self._cors()
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The UI cancels obsolete frame requests on pause/seek. A closed
+            # response socket is not a failed capture; the watchdog covers exit.
+            self.close_connection = True
 
     def do_OPTIONS(self) -> None:
         if self.headers.get("Origin") not in ALLOWED_ORIGINS:
@@ -83,6 +91,8 @@ class BridgeRequest(BaseHTTPRequestHandler):
             return
         self.send_response(204)
         self._cors()
+        self.send_header("Content-Length", "0")
+        self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -158,7 +168,7 @@ class BridgeRequest(BaseHTTPRequestHandler):
                     raise ValueError("请选择战斗资源包")
                 result = self.server.setup.import_resources(body["path"], controller)
             elif path == "/v1/reset":
-                result = controller.reset(body.get("seed", 1), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"))
+                result = controller.reset(body.get("seed", 1), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"),body.get("tower0"),body.get("tower1"))
             elif path == "/v1/pause":
                 result = controller.pause()
             elif path == "/v1/suspend":
@@ -187,7 +197,7 @@ class BridgeRequest(BaseHTTPRequestHandler):
                 result = controller.replay(body.get("seed"), body.get("actions", []),
                                            body.get("targetTick"), body.get("expectedDigest"),
                                            body.get("snapshotHandle"), body.get("baseTick"),
-                                           body.get("baseDigest"), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"))
+                                           body.get("baseDigest"), body.get("deck0"), body.get("deck1"),body.get("forms0"),body.get("forms1"),body.get("level"),body.get("dealMode"),body.get("tower0"),body.get("tower1"))
             else:
                 self._send(404, {"error": "not found"})
                 return

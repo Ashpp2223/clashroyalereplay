@@ -5,8 +5,19 @@ from .paths import ROOT
 CARDS = json.loads((ROOT / 'src/data/nativeCards.json').read_text(encoding='utf-8'))
 CARD_IDS = {card['id'] for card in CARDS}
 FORM_MASKS = {card['id']: card['forms'] for card in CARDS}
+CHAMPION_IDS = {card['id'] for card in CARDS if card['rarity'] == 'champion'}
 OMITTED_STARTING_CARDS = {card['id'] for card in CARDS if card.get('omitFromStartingHand')}
 STANDARD_DECK = (26000000, 26000001, 26000005, 28000001, 28000000, 26000003, 26000014, 26000018)
+TOWER_CARDS = json.loads((ROOT / 'src/data/nativeTowerCards.json').read_text(encoding='utf-8'))
+TOWER_IDS = {card['id'] for card in TOWER_CARDS}
+DEFAULT_TOWER = 159000000
+
+
+def validate_towers(tower0=None, tower1=None):
+    result = tuple(DEFAULT_TOWER if tower is None else tower for tower in (tower0, tower1))
+    if any(type(tower) is not int or tower not in TOWER_IDS for tower in result):
+        raise ValueError('塔楼牌不受当前引擎支持')
+    return result
 
 
 def validate_level(level=None):
@@ -65,7 +76,9 @@ def validate_forms(decks, forms0=None, forms1=None):
         forms=[0]*8 if forms is None else forms
         if not isinstance(forms,list) or len(forms)!=8 or any(type(mode) is not int or mode not in (0,1,2) or (mode and not FORM_MASKS[card]&mode) for card,mode in zip(deck,forms)):
             raise ValueError('卡牌形态不受当前引擎支持')
-        if forms.count(1)>2 or forms.count(2)>2 or sum(mode!=0 for mode in forms)>3:
-            raise ValueError('每方最多两张觉醒、两张精英，特殊形态合计最多三张')
+        evolutions = forms.count(1)
+        heroes = sum(mode == 2 or card in CHAMPION_IDS for card, mode in zip(deck, forms))
+        if max(0, evolutions-1) + max(0, heroes-1) > 1:
+            raise ValueError('每方有一个觉醒位、一个精英位、一个万能位；精英和英雄共用精英位或万能位')
         result.append(tuple(forms))
     return tuple(result)

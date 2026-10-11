@@ -107,7 +107,7 @@ def write_avd(home, sdk, device_home=None):
 class SetupManager:
     def __init__(self, home=RUNTIME_HOME):
         self.home = Path(home)
-        self.status = {"state": "idle", "stage": "", "downloaded": 0, "total": sum(item[1] for item in ARCHIVES), "error": None}
+        self.status = {"state": "idle", "stage": "", "stageCode": "idle", "downloaded": 0, "total": sum(item[1] for item in ARCHIVES), "error": None}
         self._thread = None
 
     def start(self, accepted, directory=None):
@@ -137,10 +137,12 @@ class SetupManager:
             sdk = installation / "sdk"
             for file, size, checksum, prefix, relative in ARCHIVES:
                 self.status["stage"] = "下载 Android 运行组件" if prefix != "x86_64" else "下载 Android 系统镜像"
+                self.status["stageCode"] = "download" if prefix != "x86_64" else "image"
                 archive = installation / "downloads" / Path(file).name
                 download_checked(GOOGLE + file, archive, size, checksum,
                                  lambda count: self.status.update(downloaded=self.status["downloaded"] + count))
                 self.status["stage"] = "校验并安装 Android 运行组件"
+                self.status["stageCode"] = "setupVerify"
                 extract_checked(archive, sdk / relative, prefix)
             result = subprocess.run([str(sdk / "emulator/emulator.exe"), "-accel-check"], capture_output=True,
                                     text=True, encoding="utf-8", errors="replace", timeout=15,
@@ -148,7 +150,7 @@ class SetupManager:
             if result.returncode:
                 raise ValueError("请启用处理器虚拟化及 Windows Hypervisor Platform，并重启电脑后重试。帮助：https://developer.android.com/studio/run/emulator-acceleration")
             write_avd(self.home, sdk, installation)
-            self.status.update(state="ready", stage="安卓环境已安装，请导入战斗资源", error=None)
+            self.status.update(state="ready", stage="安卓环境已安装，请导入战斗资源", stageCode="installed", error=None)
         except Exception as error:
             self.status.update(state="failed", error=str(error))
 
@@ -161,7 +163,7 @@ class SetupManager:
             try:
                 from .runtime import AndroidRuntime, sha256
                 from .install_runtime import Device, import_export, validate_apk, validate_export, install, PACKAGE
-                self.status.update(state="importing", stage="校验并导入战斗资源", error=None)
+                self.status.update(state="importing", stage="校验并导入战斗资源", stageCode="importing", error=None)
                 archive = Path(archive_path)
                 digest = sha256(archive)
                 staging = self.home / ("resources-" + digest[:16])
@@ -181,6 +183,7 @@ class SetupManager:
                 runtime = AndroidRuntime()
                 controller.runtime = runtime
                 self.status["stage"] = "首次启动安卓环境"
+                self.status["stageCode"] = "boot"
                 runtime.serial = runtime._find_arm64_device()
                 if not runtime.serial:
                     runtime._launch_sdk_emulator()
@@ -189,6 +192,7 @@ class SetupManager:
                 runtime.command("root", check=False)
                 runtime.command("wait-for-device")
                 self.status["stage"] = "安装并核验战斗资源"
+                self.status["stageCode"] = "battle"
                 device=Device(str(runtime.adb),runtime.serial)
                 if device.shell(f'pm path {PACKAGE}',check=False).startswith('package:'):
                     install(device,apk,self.home/('resource-upgrade-'+digest[:16]+'.json'))
@@ -197,7 +201,7 @@ class SetupManager:
                 (self.home / "prepared.json").write_text(json.dumps({"path": str(apk), "apkSha256": receipt["apkSha256"]}), encoding="utf-8")
                 runtime.apk_sha256 = receipt["apkSha256"]
                 controller.last_error = None
-                self.status.update(state="ready", stage="战斗资源已导入，点击开始连接", error=None)
+                self.status.update(state="ready", stage="战斗资源已导入，正在自动连接", stageCode="complete", error=None)
             except Exception as error:
                 controller.close()
                 self.status.update(state="failed", error=str(error))
