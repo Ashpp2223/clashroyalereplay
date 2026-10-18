@@ -1,25 +1,52 @@
 import { NativeUiError } from "./errors.ts";
 import nativeCards from "../data/nativeCards.json" with { type: "json" };
 import nativeTowerCards from "../data/nativeTowerCards.json" with { type: "json" };
-export const NATIVE_TOWER_CATALOG:readonly {id:number;name:string;engineName:string}[] = nativeTowerCards;
-export const DEFAULT_NATIVE_TOWER = 159000000;
-export function validateNativeTower(tower:number = DEFAULT_NATIVE_TOWER):void {
-  if(!Number.isSafeInteger(tower) || !NATIVE_TOWER_CATALOG.some(card=>card.id===tower))
-    throw new NativeUiError("invalidTower", "塔楼牌不受当前引擎支持");
-}
+import cnEngineProfile from "../data/cnEngineProfile.json" with { type: "json" };
 export interface NativeCardDefinition {
   id:number;name:string;engineName:string;cost:number;kind:string;image:string|null;
   rarity:'common'|'rare'|'epic'|'legendary'|'champion';
   forms:number;evolutionImage:string|null;heroImage:string|null;abilityNames:string[];omitFromStartingHand:boolean;
 }
 const RARITY_ORDER = {common:0,rare:1,epic:2,legendary:3,champion:4} as const;
-export const NATIVE_CARD_CATALOG:readonly NativeCardDefinition[] = (nativeCards as NativeCardDefinition[]).slice()
-  .sort((a,b)=>a.cost-b.cost || RARITY_ORDER[a.rarity]-RARITY_ORDER[b.rarity] || a.id-b.id);
-const SUPPORTED_CARD_IDS = new Set(nativeCards.map(card => card.id));
+export interface NativeEngineCatalog {
+  cards:readonly NativeCardDefinition[];
+  towers:readonly {id:number;name:string;engineName:string}[];
+  defaultTower:number;defaultLevel:number;
+}
+const LEGACY_CATALOG:NativeEngineCatalog={cards:nativeCards as NativeCardDefinition[],towers:nativeTowerCards,defaultTower:159000000,defaultLevel:16};
+const CN_CATALOG=cnEngineProfile.catalog as NativeEngineCatalog;
+let activeCatalog=LEGACY_CATALOG;
+const sortedCards=(cards:readonly NativeCardDefinition[])=>cards.slice().sort((a,b)=>a.cost-b.cost || RARITY_ORDER[a.rarity]-RARITY_ORDER[b.rarity] || a.id-b.id);
+export let NATIVE_CARD_CATALOG:readonly NativeCardDefinition[]=sortedCards(activeCatalog.cards);
+export let NATIVE_TOWER_CATALOG=activeCatalog.towers;
+export let DEFAULT_NATIVE_TOWER=activeCatalog.defaultTower;
+export let DEFAULT_NATIVE_LEVEL=activeCatalog.defaultLevel;
+
+export function configureNativeCatalog(catalog:NativeEngineCatalog|undefined,identity:EngineIdentity):void {
+  const expected=catalogForEngine(identity);
+  if(catalog && JSON.stringify(catalog)!==JSON.stringify(expected))throw new NativeUiError('engineMismatch','引擎卡牌目录与本程序配置不符');
+  activeCatalog=expected;
+  NATIVE_CARD_CATALOG=sortedCards(expected.cards);NATIVE_TOWER_CATALOG=expected.towers;
+  DEFAULT_NATIVE_TOWER=expected.defaultTower;DEFAULT_NATIVE_LEVEL=expected.defaultLevel;
+}
+
+function catalogForEngine(identity:EngineIdentity):NativeEngineCatalog {
+  if(identity.protocolVersion==='cr-camp-control.v1'){
+    if(identity.libgSha256!==cnEngineProfile.identity.libgSha256 || identity.runtimeFingerprintSha256!==cnEngineProfile.identity.runtimeFingerprintSha256)
+      throw new NativeUiError('engineMismatch','未知国服规则版本');
+    return CN_CATALOG;
+  }
+  return LEGACY_CATALOG;
+}
+
+function validateTower(tower:number|undefined,catalog:NativeEngineCatalog):void {
+  const id=tower===undefined?catalog.defaultTower:tower;
+  if(!Number.isSafeInteger(id)||!catalog.towers.some(card=>card.id===id))throw new NativeUiError('invalidTower','塔楼牌不受当前引擎支持');
+}
+export function validateNativeTower(tower:number=DEFAULT_NATIVE_TOWER):void {validateTower(tower,activeCatalog);}
 
 export const NATIVE_REPLAY_SCHEMA = "cr-native-replay.v2" as const;
 export const ENGINE_TICKS_PER_SECOND = 20;
-export const DEFAULT_NATIVE_LEVEL = 16;
 export const STANDARD_NATIVE_DECK = [26000000, 26000001, 26000005, 28000001,
   28000000, 26000003, 26000014, 26000018] as const;
 
@@ -93,26 +120,39 @@ export interface NativeWorkingBranch {
   actions: NativeBattleAction[];
 }
 
+// Session-only viewing state; never serialized into the replay project.
+export interface NativePlaybackRoute { nodeId:string; maxTick:number; edgeId?:string }
+
 export function validateNativeDeck(deck: readonly number[]): void {
+  validateDeck(deck,activeCatalog);
+}
+function validateDeck(deck:readonly number[],catalog:NativeEngineCatalog):void {
+  const ids=new Set(catalog.cards.map(card=>card.id));
   if (!Array.isArray(deck) || deck.length !== 8 || new Set(deck).size !== 8 ||
-      deck.some(card => !Number.isSafeInteger(card) || !SUPPORTED_CARD_IDS.has(card))) {
+      deck.some(card => !Number.isSafeInteger(card) || !ids.has(card))) {
     throw new NativeUiError("invalidDeck", "每方需要八张不同的受支持普通卡牌");
   }
 }
 
 export function validateNativeForms(deck:readonly number[], forms:readonly number[] = Array(8).fill(0)):void {
+  validateForms(deck,forms,activeCatalog);
+}
+function validateForms(deck:readonly number[],forms:readonly number[]=Array(8).fill(0),catalog:NativeEngineCatalog):void {
   if (!Array.isArray(forms) || forms.length !== 8 || forms.some((mode,index) =>
-      !Number.isSafeInteger(mode) || ![0,1,2].includes(mode) || (mode !== 0 && !((NATIVE_CARD_CATALOG.find(card=>card.id===deck[index])?.forms??0) & mode)))) throw new NativeUiError("invalidForms", "卡牌形态不受当前引擎支持");
-  nativeDeckSpecialSlots(deck,forms);
+      !Number.isSafeInteger(mode) || ![0,1,2].includes(mode) || (mode !== 0 && !((catalog.cards.find(card=>card.id===deck[index])?.forms??0) & mode)))) throw new NativeUiError("invalidForms", "卡牌形态不受当前引擎支持");
+  deckSpecialSlots(deck,forms,catalog);
 }
 
 export type NativeSpecialSlot = 'evolutionSlot'|'heroSlot'|'wildSlot';
 // Special slots are independent of this recorder's starting-hand order.
 export function nativeDeckSpecialSlots(deck:readonly number[], forms:readonly number[]):(NativeSpecialSlot|null)[] {
+  return deckSpecialSlots(deck,forms,activeCatalog);
+}
+function deckSpecialSlots(deck:readonly number[],forms:readonly number[],catalog:NativeEngineCatalog):(NativeSpecialSlot|null)[] {
   let evolutionUsed=false,heroUsed=false,wildUsed=false;
   return deck.map((id,index)=>{
     const evolution=forms[index]===1;
-    const hero=forms[index]===2 || NATIVE_CARD_CATALOG.find(card=>card.id===id)?.rarity==='champion';
+    const hero=forms[index]===2 || catalog.cards.find(card=>card.id===id)?.rarity==='champion';
     if(!evolution&&!hero)return null;
     if(evolution&&!evolutionUsed){evolutionUsed=true;return 'evolutionSlot';}
     if(hero&&!heroUsed){heroUsed=true;return 'heroSlot';}
@@ -122,8 +162,11 @@ export function nativeDeckSpecialSlots(deck:readonly number[], forms:readonly nu
 }
 
 export function validateNativeDeal(deck:readonly number[]):void {
-  validateNativeDeck(deck);
-  const omitted=(id:number)=>Boolean(NATIVE_CARD_CATALOG.find(card=>card.id===id)?.omitFromStartingHand);
+  validateDeal(deck,activeCatalog);
+}
+function validateDeal(deck:readonly number[],catalog:NativeEngineCatalog):void {
+  validateDeck(deck,catalog);
+  const omitted=(id:number)=>Boolean(catalog.cards.find(card=>card.id===id)?.omitFromStartingHand);
   const count=deck.filter(omitted).length;
   const positions=deck.map((id,index)=>omitted(id)?index:-1).filter(index=>index>=0);
   const expected=count===0?[]:count===1?[7]:[5,7];
@@ -182,6 +225,20 @@ export function checkoutNativeNode(project: NativeReplayProject, nodeId: string)
   const node = project.nodes[nodeId];
   if (!node) throw new NativeUiError("invalidProject", "节点不存在");
   return { checkedOutNodeId: nodeId, workingTick: node.finalTick, actions: [] };
+}
+
+export function nativeEdgeProgress(project:NativeReplayProject,childId:string,tick:number):number {
+  const child=project.nodes[childId],parent=child?.parentId?project.nodes[child.parentId]:null;
+  if(!parent)throw new NativeUiError('invalidProject','连线必须连接父子节点');
+  const duration=child.finalTick-parent.finalTick;
+  return duration===0?1:Math.max(0,Math.min(1,(tick-parent.finalTick)/duration));
+}
+
+export function nativeEdgeBranch(project:NativeReplayProject,childId:string,tick:number):NativeWorkingBranch {
+  const child=project.nodes[childId],parent=child?.parentId?project.nodes[child.parentId]:null;
+  if(!parent||!Number.isInteger(tick)||tick<parent.finalTick||tick>child.finalTick)throw new NativeUiError('invalidProject','时间段位置无效');
+  if(tick===child.finalTick)return checkoutNativeNode(project,childId);
+  return {checkedOutNodeId:parent.id,workingTick:tick,actions:child.actionsFromParent.filter(action=>action.tick<=tick)};
 }
 
 export function advanceNativeWork(branch: NativeWorkingBranch, tick: number): NativeWorkingBranch {
@@ -300,6 +357,16 @@ export function nearestNativeSnapshotNode(
     node.finalTick <= targetTick && availableIds.has(node.id)) ?? null;
 }
 
+export function canReuseNativeSnapshot(previous: NativeReplayProject, next: NativeReplayProject, nodeId: string): boolean {
+  if (previous.projectId !== next.projectId || !previous.nodes[nodeId] || !next.nodes[nodeId] ||
+      JSON.stringify(previous.engine) !== JSON.stringify(next.engine) ||
+      JSON.stringify(previous.match) !== JSON.stringify(next.match)) return false;
+  // Metadata edits are harmless; every ancestor's battle history must still match.
+  const history = (project: NativeReplayProject) => nativePathToNode(project, nodeId).map(node =>
+    [node.id, node.finalTick, node.stateDigest, node.actionsFromParent]);
+  return JSON.stringify(history(previous)) === JSON.stringify(history(next));
+}
+
 export function updateNativeNodeMetadata(
   project: NativeReplayProject,
   nodeId: string,
@@ -370,15 +437,16 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
       project.match.deck1?.length !== 8) {
     throw new NativeUiError("invalidProject", "随机种子或卡组无效");
   }
-  validateNativeDeck(project.match.deck0);
-  validateNativeDeck(project.match.deck1);
-  validateNativeTower(project.match.tower0);
-  validateNativeTower(project.match.tower1);
-  validateNativeForms(project.match.deck0,project.match.forms0);
-  validateNativeForms(project.match.deck1,project.match.forms1);
+  const catalog=catalogForEngine(project.engine);
+  validateDeck(project.match.deck0,catalog);
+  validateDeck(project.match.deck1,catalog);
+  validateTower(project.match.tower0,catalog);
+  validateTower(project.match.tower1,catalog);
+  validateForms(project.match.deck0,project.match.forms0,catalog);
+  validateForms(project.match.deck1,project.match.forms1,catalog);
   if(project.match.level!==undefined && (!Number.isSafeInteger(project.match.level) || project.match.level<1 || project.match.level>16))throw new NativeUiError("invalidProject", "战斗等级必须为 1～16 级");
   if(project.match.dealMode!==undefined && project.match.dealMode!=='ordered')throw new NativeUiError("invalidProject", "初始牌序模式无效");
-  if(project.match.dealMode==='ordered') [project.match.deck0,project.match.deck1].forEach(validateNativeDeal);
+  if(project.match.dealMode==='ordered') [project.match.deck0,project.match.deck1].forEach(deck=>validateDeal(deck,catalog));
   if (!['standard', 'custom'].includes(project.match.preset)) throw new NativeUiError("invalidProject", "卡组配置格式无效");
   if (project.match.preset === 'standard' && [project.match.deck0, project.match.deck1].some(deck =>
       JSON.stringify(deck) !== JSON.stringify(STANDARD_NATIVE_DECK))) throw new NativeUiError("invalidProject", "标准卡组配置与预设不一致");
@@ -407,7 +475,7 @@ export function validateNativeProject(input: unknown): NativeReplayProject {
     let lastTick = parent?.finalTick ?? node.finalTick;
     let lastSequence = -1;
     for (const action of node.actionsFromParent) {
-      validateAction(action);
+      validateAction(action,catalog);
       if (action.nativeCardId !== undefined && !project.match[action.owner === 0 ? 'deck0' : 'deck1'].includes(action.nativeCardId)) throw new NativeUiError("invalidProject", "出牌不属于该方初始卡组");
       if (action.tick <= (parent?.finalTick ?? -1) || action.tick > node.finalTick ||
           action.tick < lastTick || (action.tick === lastTick && action.sequence <= lastSequence)) {
@@ -434,12 +502,12 @@ export function formatNativeTick(tick: number): string {
   }`;
 }
 
-function validateAction(action: NativeBattleAction): void {
+function validateAction(action: NativeBattleAction,catalog:NativeEngineCatalog=activeCatalog): void {
   if (!action.id || !Number.isSafeInteger(action.tick) || !Number.isSafeInteger(action.sequence) ||
       action.tick < 0 || action.sequence < 0 || (action.owner !== 0 && action.owner !== 1)) throw new NativeUiError("invalidProject", "动作字段无效");
   if (action.kind === "play-card") {
     if(action.nativeForm!==undefined && ![0,1,2].includes(action.nativeForm))throw new NativeUiError("invalidProject", "出牌形态无效");
-    if (!Number.isSafeInteger(action.nativeCardId) || !SUPPORTED_CARD_IDS.has(action.nativeCardId!) || !Number.isSafeInteger(action.slot) ||
+    if (!Number.isSafeInteger(action.nativeCardId) || !catalog.cards.some(card=>card.id===action.nativeCardId) || !Number.isSafeInteger(action.slot) ||
         action.slot! < 0 || action.slot! > 3 || !Number.isSafeInteger(action.nativeX) ||
         !Number.isSafeInteger(action.nativeY) || action.nativeX! < 0 || action.nativeX! > 18000 ||
         action.nativeY! < 0 || action.nativeY! > 32000) throw new NativeUiError("invalidProject", "出牌动作字段无效");

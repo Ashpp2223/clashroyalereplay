@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {mkdir,readFile,readdir,writeFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {openDesktopHarness} from './desktop_control.mjs';
+import {STANDARD_NATIVE_DECK} from '../src/domain/nativeReplay.ts';
 const home=resolve('.local-runtime/native-ux-check');
 const runtime=process.env.LOCALAPPDATA+'/cr-replay-clean-test';
 const report={status:'running',checks:[],screenshots:[],errors:[]};
@@ -38,8 +39,12 @@ try {
  report.screenshots.push(await harness.screenshot('01-home'));
  await page.getByRole('button',{name:'新建存档',exact:true}).click();
  let dialog=page.locator('.deck-dialog');await dialog.getByLabel('新存档名称').fill(title);
+ for(const side of ['敌方','我方']){
+  await dialog.getByRole('button',{name:`${side} · 0/8`,exact:true}).click();
+  for(const id of STANDARD_NATIVE_DECK)await dialog.locator(`.card-catalog button[data-card-id="${id}"]`).click();
+ }
  await dialog.getByLabel('我方骑士形态').selectOption('2');
- await dialog.getByRole('button',{name:'将骑士后移',exact:true}).click();
+ await dialog.locator('.selected-deck-card[data-card-id="26000000"] .initial-card').press('ArrowRight');
  await dialog.getByRole('button',{name:'创建存档并开始',exact:true}).click();
  await page.locator('.help-dialog').waitFor({timeout:180000});await page.locator('.help-dialog').getByRole('button',{name:'关闭'}).click();
  await waitReady(page);report.checks.push('create-resumes-after-runtime-start; first-guide-after-battle-ready');

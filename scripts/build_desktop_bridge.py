@@ -12,10 +12,12 @@ def main():
     work = ROOT / ".local-runtime/package-build"
     command = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--onedir", "--noupx",
                "--name", "native-bridge", "--distpath", str(output), "--workpath", str(work),
-               "--specpath", str(work), "--paths", str(ROOT), "--collect-all", "imageio_ffmpeg"]
+               "--specpath", str(work), "--paths", str(ROOT), "--collect-all", "imageio_ffmpeg",
+               "--hidden-import", "psutil"]
     data = [(ROOT / "bridge/content_lock.json", "bridge"),
             (ROOT / "src/data/nativeCards.json", "src/data"),
             (ROOT / "src/data/nativeTowerCards.json", "src/data"),
+            (ROOT / "src/data/cnEngineProfile.json", "src/data"),
             (VENDOR / "standard_match.json", "vendor/clash-royale-battle-engine"),
             (VENDOR / "vendor/firstlight/supported_engine.json", "vendor/clash-royale-battle-engine/vendor/firstlight"),
             (VENDOR / "prebuilt/libcrprobe.so", "vendor/clash-royale-battle-engine/prebuilt"),

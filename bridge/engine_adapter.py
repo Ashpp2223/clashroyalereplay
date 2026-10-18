@@ -23,15 +23,33 @@ def _load_package() -> None:
 
 def new_engine():
     _load_package()
+    if cn_profile_enabled():
+        from .cn_engine import new_engine as new_cn_engine
+        return new_cn_engine(engine_port())
     from native_engine.engine import RenderedEngine
     return RenderedEngine(port=engine_port())
 
 
 def engine_port():
-    port = int(os.environ.get('CR_ENGINE_PORT', '26789'))
+    port = int(os.environ.get('CR_ENGINE_PORT', '26791' if cn_profile_enabled() else '26789'))
     if not 1024 <= port <= 65535:
         raise ValueError('战斗接口端口无效')
     return port
+
+
+def cn_profile_enabled():
+    profile = os.environ.get('CR_ENGINE_PROFILE', 'legacy')
+    if profile not in ('legacy', 'cn-38.4.5'):
+        raise ValueError('未知战斗引擎配置')
+    return profile == 'cn-38.4.5'
+
+
+def new_runtime():
+    if cn_profile_enabled():
+        from .cn_engine import CampRuntime
+        return CampRuntime()
+    from .runtime import AndroidRuntime
+    return AndroidRuntime()
 
 
 def new_play(owner: int, slot: int, x: int, y: int):

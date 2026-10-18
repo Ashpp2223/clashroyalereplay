@@ -81,6 +81,7 @@ class State:
     entities: tuple[Entity, ...]
     plays: tuple[CardPlay, ...]
     next_sequence: int
+    crop_profile: dict | None = None  # Presentation metadata; excluded from battle digests.
 
     @classmethod
     def decode(cls, data):

@@ -101,11 +101,24 @@ def resource_hashes(device: Device, directory: str = DATA + "/update", *, requir
     return hashes
 
 
-def base_asset_hashes(device: Device, hashes: dict[str, str], apk: str) -> dict[str, str]:
+def base_asset_hashes(device: Device, hashes: dict[str, str], apk: str | Path) -> dict[str, str]:
     """Android uses unchanged APK assets when an update omits redundant copies."""
     if hashes.get("fingerprint.json") not in CONTENT_LOCK["fingerprints"]:
         return {}  # Report the missing/unsupported update before inspecting fallbacks.
     result = {}
+    if isinstance(apk, Path):
+        # Runtime callers supply an already hashed local copy and require a
+        # completed APK scan for the installed file's current identity.
+        with zipfile.ZipFile(apk) as archive:
+            for name in CONTENT_LOCK['apkFallbackFiles']:
+                if name in hashes:
+                    continue
+                digest = hashlib.sha256()
+                with archive.open('assets/' + name) as source:
+                    for chunk in iter(lambda: source.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                result[name] = digest.hexdigest()
+        return result
     for name in CONTENT_LOCK["apkFallbackFiles"]:
         if name in hashes:
             continue
@@ -135,6 +148,21 @@ def recover_pending_downloads(device: Device, hashes: dict[str, str]) -> dict[st
         return hashes
     if hashes.get("fingerprint.json") not in CONTENT_LOCK["fingerprints"]:
         raise ValueError("更新指纹未核验，不能恢复下载临时文件")
+    missing = []
+    for name in pending:
+        target = name.removesuffix('.update')
+        if not target or target.startswith('/') or '..' in target.split('/') or '\\' in target:
+            raise ValueError('下载临时文件路径无效')
+        if target in hashes:
+            if hashes[target] != hashes[name]:
+                raise ValueError(f'正式资源与下载临时文件冲突：{target}')
+            # Both files were just fully hashed. A retained, identical download
+            # has already been published; it must not stop a warm game again.
+        else:
+            missing.append(name)
+    pending = missing
+    if not pending:
+        return hashes
     device.shell(f"am force-stop {PACKAGE}")
     fingerprint_path = DATA + "/update/fingerprint.json"
     if file_hash(device, fingerprint_path) != hashes["fingerprint.json"]:
@@ -144,16 +172,11 @@ def recover_pending_downloads(device: Device, hashes: dict[str, str]) -> dict[st
     plan = []
     for name in pending:
         target = name.removesuffix(".update")
-        if not target or target.startswith("/") or ".." in target.split("/") or "\\" in target:
-            raise ValueError("下载临时文件路径无效")
         source = DATA + "/update/" + name
         result = device.shell("sha1sum " + shlex.quote(source)).split()
         if not result or not re.fullmatch(r"[0-9a-f]{40}", result[0]) or result[0] != expected.get(target):
             raise ValueError(f"下载临时文件未完成或不匹配：{name}")
-        if target in hashes and hashes[target] != hashes[name]:
-            raise ValueError(f"正式资源与下载临时文件冲突：{target}")
-        if target not in hashes:
-            plan.append((name, target))
+        plan.append((name, target))
     updated = dict(hashes)
     for name, target in plan:
         source, destination = (DATA + "/update/" + item for item in (name, target))

@@ -1,16 +1,46 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {createNativeProject,checkoutNativeNode,advanceNativeWork,appendConfirmedNativeAction,copyNativeNode,createNativeCheckpoint,deleteNativeSubtree,STANDARD_NATIVE_DECK,updateNativeNodeMetadata} from '../src/domain/nativeReplay.ts';
+import {createNativeProject,checkoutNativeNode,advanceNativeWork,appendConfirmedNativeAction,copyNativeNode,createNativeCheckpoint,deleteNativeSubtree,STANDARD_NATIVE_DECK,updateNativeNodeMetadata,nativeEdgeBranch,nativeEdgeProgress} from '../src/domain/nativeReplay.ts';
 import {EditHistory,structureEntry,undoStructure} from '../src/native/history.ts';
 import {restoreUndoBranch,withoutLastDraftAction,UndoRecoveryError} from '../src/native/undo.ts';
 import {isNativeProjectPath,listReplayArchives,readNativeProject,reopenNativeSession} from '../src/native/files.ts';
 import {zh,en,translate,storedLanguage,LANGUAGE_KEY} from '../src/native/i18n.ts';
+import {readFile} from 'node:fs/promises';
 const identity={upstreamCommit:'commit',probeSha256:'probe',apkSha256:'apk',libgSha256:'libg',runtimeFingerprintSha256:'runtime',protocolVersion:'v1',cropProfileId:'stock'};
 const source=createNativeProject(identity,{seed:41,preset:'standard',deck0:[...STANDARD_NATIVE_DECK],deck1:[...STANDARD_NATIVE_DECK]},90,'root','User title');
 const base=checkoutNativeNode(source,source.rootNodeId);
 const action={id:'play',tick:91,sequence:0,owner:1,kind:'play-card',nativeCardId:26000000,slot:0,nativeX:3500,nativeY:13000};
 const work=appendConfirmedNativeAction(source,advanceNativeWork(base,100),action);
 const paused={tick:100,digest:'original'};
+
+test('edges represent intervals; sibling histories remain separate and endpoints select the child',()=>{
+ const b=createNativeCheckpoint(source,advanceNativeWork(work,110),'B');
+ const c=createNativeCheckpoint(b.project,advanceNativeWork(base,120),'C');
+ assert.equal(nativeEdgeProgress(c.project,b.node.id,100),.5);
+ assert.equal(nativeEdgeProgress(c.project,b.node.id,500),1);
+ assert.deepEqual(nativeEdgeBranch(c.project,b.node.id,100),{checkedOutNodeId:source.rootNodeId,workingTick:100,actions:[action]});
+ assert.deepEqual(nativeEdgeBranch(c.project,b.node.id,110),checkoutNativeNode(c.project,b.node.id));
+ assert.deepEqual(nativeEdgeBranch(c.project,c.node.id,100).actions,[]);
+ assert.throws(()=>nativeEdgeBranch(c.project,b.node.id,111));
+ assert.equal(c.project.nodes[b.node.id].actionsFromParent.length,1);
+ const same=copyNativeNode(c.project,base,'root');
+ assert.equal(nativeEdgeProgress(same.project,same.node.id,90),1);
+});
+
+test('every supported skill has a decoded game icon and an explicit elixir cost',async()=>{
+ const readJson=async path=>JSON.parse(await readFile(new URL(path,import.meta.url),'utf8'));
+ const [legacy,cn,icons]=await Promise.all(['../src/data/nativeCards.json','../src/data/cnEngineProfile.json','../src/data/nativeAbilityIcons.json'].map(readJson));
+ const names=new Set([...legacy,...cn.catalog.cards].flatMap(card=>card.abilityNames));
+ assert.equal(names.size,26);
+ for(const name of names) {
+  const icon=icons.abilities[name];assert(icon,`Missing ${name}`);
+  assert(Number.isInteger(icon.cost)&&icon.cost>=0);
+  const bytes=await readFile(new URL(`../public${icon.image}`,import.meta.url));
+  assert.equal(bytes.subarray(1,4).toString(),'PNG');
+  assert(bytes.readUInt32BE(16)>=24 && bytes.readUInt32BE(20)>=24,`${name} icon is too small`);
+ }
+ assert(Object.keys(icons.source.assetsSha256).every(path=>path.startsWith('sc/')));
+});
 const reduced=withoutLastDraftAction(source,work,'play');
 
 test('history bounds and continuous text grouping preserve the earliest reversible value',()=>{
@@ -130,12 +160,27 @@ test('seeking back then resuming cannot make a saved future action eligible for 
 
 test('network disconnects and malformed replay replies use stable codes before UI recovery',async()=>{
  const {NativeBridge}=await import('../src/native/bridge.ts');
- globalThis.window={__TAURI_INTERNALS__:{invoke:async()=>({port:26792,token:'unit-test-only',protocol:'native-bridge.v1'})}};
+ const failures=[];
+ globalThis.window={__TAURI_INTERNALS__:{invoke:async(command,args)=>{
+  if(command==='write_native_diagnostic'){failures.push(JSON.parse(args.data));return;}
+  return {port:26792,token:'unit-test-only',protocol:'native-bridge.v1'};
+ }}};
  const client=await NativeBridge.launch();const previousFetch=globalThis.fetch;
  try {
   globalThis.fetch=async()=>{throw new TypeError('Network disconnected');};
   await assert.rejects(client.post('/v1/pause'),error=>error.code==='requestFailed');
   globalThis.fetch=async()=>({ok:true,json:async()=>{throw new SyntaxError('Invalid response JSON');}});
   await assert.rejects(client.replay(41,[],90),error=>error.code==='replayFailed');
+  assert.equal(failures[0].path,'/v1/pause');
+  assert.match(failures[0].error,/Network disconnected/);
+  assert.equal(failures[1].path,'/v1/replay');
+  globalThis.fetch=async()=>({ok:false,status:409,json:async()=>({error:'Capture failed unit-test-only'})});
+  await assert.rejects(client.frame(true),error=>error.code==='frameFailed'&&error.message.includes('Capture failed'));
+  assert.equal(failures.at(-1).path,'/v1/frame?fresh=1');
+  assert(!JSON.stringify(failures).includes('unit-test-only'));
+  const count=failures.length,abort=new AbortController();abort.abort();
+  globalThis.fetch=async()=>{throw new DOMException('Cancelled by a newer frame','AbortError');};
+  await assert.rejects(client.frame(true,abort.signal));
+  assert.equal(failures.length,count,'Replacing an obsolete frame must not create a false failure record');
  }finally{globalThis.fetch=previousFetch;}
 });

@@ -128,7 +128,9 @@ class Engine:
 class RenderedEngine(Engine):
     """One paused, exactly stepped battle drawn by the stock game UI."""
 
-    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None, *, warmup_speed=1):
+        if type(warmup_speed) is not int or warmup_speed not in (1, 4):
+            raise ValueError('warmup speed must be 1 or 4')
         self.state = None
         match = match_configuration(seed, deck0, deck1, forms0, forms1, level, tower0, tower1)
         status = self.request('status')
@@ -149,7 +151,19 @@ class RenderedEngine(Engine):
         paused = self.request('pause')
         current_tick = paused['tick']
         if current_tick < 90:
-            self.request(f'advance-native {90 - current_tick}')
+            if warmup_speed != 1:
+                speed = self.set_speed(warmup_speed)
+                if not speed.get('ok'):
+                    raise RuntimeError(speed.get('error', 'could not accelerate native warmup'))
+            try:
+                advanced = self.request(f'advance-native {90 - current_tick}')
+                if not advanced.get('ok'):
+                    raise RuntimeError(advanced.get('error', 'could not advance native warmup'))
+            finally:
+                if warmup_speed != 1:
+                    restored = self.set_speed(1)
+                    if not restored.get('ok'):
+                        raise RuntimeError(restored.get('error', 'could not restore native warmup speed'))
         self.state = self._capture()
         if self.state.tick != 90:
             raise RuntimeError(f'native renderer missed the first playable tick: {self.state.tick}')

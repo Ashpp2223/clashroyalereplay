@@ -12,6 +12,19 @@ TOWER_CARDS = json.loads((ROOT / 'src/data/nativeTowerCards.json').read_text(enc
 TOWER_IDS = {card['id'] for card in TOWER_CARDS}
 DEFAULT_TOWER = 159000000
 
+from .engine_adapter import cn_profile_enabled
+if cn_profile_enabled():
+    from .cn_engine import load_profile
+    _catalog = load_profile()['catalog']
+    CARDS = _catalog['cards']
+    CARD_IDS = {card['id'] for card in CARDS}
+    FORM_MASKS = {card['id']: card['forms'] for card in CARDS}
+    CHAMPION_IDS = {card['id'] for card in CARDS if card['rarity'] == 'champion'}
+    OMITTED_STARTING_CARDS = {card['id'] for card in CARDS if card.get('omitFromStartingHand')}
+    TOWER_CARDS = _catalog['towers']
+    TOWER_IDS = {card['id'] for card in TOWER_CARDS}
+    DEFAULT_TOWER = _catalog['defaultTower']
+
 
 def validate_towers(tower0=None, tower1=None):
     result = tuple(DEFAULT_TOWER if tower is None else tower for tower in (tower0, tower1))

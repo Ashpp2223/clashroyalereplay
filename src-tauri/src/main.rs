@@ -56,7 +56,9 @@ fn retire_bridge(mut process: BridgeProcess) {
         let _ = input.write_all(b"shutdown\n");
         let _ = input.flush();
     }
-    let deadline = Instant::now() + Duration::from_secs(15);
+    // Video/probe cleanup and the emulator's 45-second Quick Boot save must
+    // finish before the process job is closed, or the next restore can stall.
+    let deadline = Instant::now() + Duration::from_secs(65);
     while Instant::now() < deadline {
         if process.child.try_wait().ok().flatten().is_some() { return; }
         thread::sleep(Duration::from_millis(50));
@@ -141,6 +143,28 @@ fn list_project_files(path: String) -> Result<Vec<SavedProjectFile>, String> {
 #[tauri::command]
 fn read_project_file(path: String) -> Result<String, String> {
     fs::read_to_string(path).map_err(format_io_error)
+}
+
+#[tauri::command]
+fn delete_native_project(path: String, directory: String, project_id: String) -> Result<(), String> {
+    let _guard = PROJECT_WRITE_LOCK.lock().map_err(|error| error.to_string())?;
+    let requested = PathBuf::from(&path);
+    if !requested.is_absolute() || !requested.file_name().and_then(|name| name.to_str())
+        .map(|name| name.to_ascii_lowercase().ends_with(".cr-native-replay.json")).unwrap_or(false) {
+        return Err("只能删除所选目录内的原生复盘存档。".to_string());
+    }
+    let metadata = fs::symlink_metadata(&requested).map_err(format_io_error)?;
+    let file = fs::canonicalize(&requested).map_err(format_io_error)?;
+    let folder = fs::canonicalize(directory).map_err(format_io_error)?;
+    if !metadata.file_type().is_file() || file.parent() != Some(folder.as_path()) {
+        return Err("存档不在所选目录内，无法删除。".to_string());
+    }
+    let project: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).map_err(format_io_error)?)
+        .map_err(|error| error.to_string())?;
+    if project["schema"] != "cr-native-replay.v2" || project_id.is_empty() || project["projectId"].as_str() != Some(project_id.as_str()) {
+        return Err("存档已变化，请刷新列表后重试。".to_string());
+    }
+    fs::remove_file(file).map_err(format_io_error)
 }
 
 #[tauri::command]
@@ -395,6 +419,17 @@ fn native_runtime_directory(app: tauri::AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+#[tauri::command]
+fn write_native_diagnostic(app: tauri::AppHandle, data: String) -> Result<(), String> {
+    if data.len() > 16384 { return Err("Diagnostic record is too large".to_string()); }
+    let value: serde_json::Value = serde_json::from_str(&data).map_err(|error| error.to_string())?;
+    if value["schema"] != "cr-native-client-failure.v1" { return Err("Invalid diagnostic record".to_string()); }
+    let sanitized = if let Ok(home) = std::env::var("USERPROFILE") {
+        data.replace(&home.replace('\\', "\\\\"), "<本机目录>").replace(&home.replace('\\', "/"), "<本机目录>")
+    } else { data };
+    atomic_write(&runtime_directory(&app)?.join("last-client-failure.json"), sanitized.as_bytes())
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .manage(BridgeState::default())
@@ -411,6 +446,7 @@ fn main() {
             executable_directory,
             list_project_files,
             read_project_file,
+            delete_native_project,
             write_project_file,
             write_native_journal,
             read_native_journal,
@@ -418,6 +454,7 @@ fn main() {
             start_native_bridge,
             configure_native_runtime,
             native_runtime_directory,
+            write_native_diagnostic,
             stop_native_bridge,
             native_test_workspace,
             finish_desktop_test
@@ -462,6 +499,29 @@ fn format_io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_deletion_checks_folder_and_identity_and_removes_only_the_selected_file() {
+        let folder = std::env::temp_dir().join(format!("native-delete-test-{}-{}",std::process::id(),timestamp_ms()));
+        let saves = folder.join("saves");
+        fs::create_dir_all(&saves).unwrap();
+        let contents = r#"{"schema":"cr-native-replay.v2","projectId":"selected"}"#;
+        let selected = saves.join("selected.cr-native-replay.json");
+        let sibling = saves.join("sibling.cr-native-replay.json");
+        let outside = folder.join("outside.cr-native-replay.json");
+        let unrelated = saves.join("settings.json");
+        for file in [&selected,&sibling,&outside,&unrelated] { fs::write(file,contents).unwrap(); }
+        let remove = |file:&Path,id:&str| delete_native_project(file.to_string_lossy().into_owned(),saves.to_string_lossy().into_owned(),id.to_string());
+        assert!(remove(&selected,"stale-project").is_err());
+        assert!(remove(&outside,"selected").is_err());
+        assert!(remove(&unrelated,"selected").is_err());
+        assert!(selected.is_file());
+        remove(&selected,"selected").unwrap();
+        assert!(!selected.exists());
+        for file in [&sibling,&outside,&unrelated] { assert_eq!(fs::read_to_string(file).unwrap(),contents); }
+        for file in [&sibling,&outside,&unrelated] { fs::remove_file(file).unwrap(); }
+        fs::remove_dir(saves).unwrap();fs::remove_dir(folder).unwrap();
+    }
 
     #[test]
     fn an_archive_allows_node_edits_but_never_initial_configuration_changes() {

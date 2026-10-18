@@ -5,16 +5,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   advanceNativeWork, appendConfirmedNativeAction, checkoutNativeNode, createNativeCheckpoint, copyNativeNode,
   createNativeProject, deleteNativeSubtree, formatNativeTick, nativeActionsToNode,
-  nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, STANDARD_NATIVE_DECK, DEFAULT_NATIVE_LEVEL,
-  updateNativeNodeMetadata, NATIVE_CARD_CATALOG, validateNativeDeck, validateNativeForms, validateNativeDeal, validateNativeTower, projectForCurrentEngine, type NativeBattleAction,
-  type NativeReplayProject, type NativeWorkingBranch
+  nativePathToNode, nativeSubtreeIds, nearestNativeSnapshotNode, canReuseNativeSnapshot, STANDARD_NATIVE_DECK, DEFAULT_NATIVE_LEVEL,
+  updateNativeNodeMetadata, nativeEdgeProgress, nativeEdgeBranch, NATIVE_CARD_CATALOG, configureNativeCatalog, validateNativeDeck, validateNativeForms, validateNativeDeal, validateNativeTower, projectForCurrentEngine, type NativeBattleAction,
+  type NativeReplayProject, type NativeWorkingBranch, type NativePlaybackRoute
 } from "./domain/nativeReplay.ts";
 import { NativeBridge, type BridgeStatus, type CropProfile, type NativeObservation } from "./native/bridge.ts";
 import { arenaPixelToWorld } from "./native/geometry.ts";
 import NativeSurface from "./native/NativeSurface.tsx";
 import NativeNodeTree from "./native/NativeNodeTree.tsx";
 import NativeMatchDialog, {type NativeCreationInput} from "./native/NativeMatchDialog.tsx";
-import { openNativeProject, readNativeProject, listReplayArchives, saveNativeProject, rememberNativeSession, reopenNativeSession, type SavedReplayEntry } from "./native/files.ts";
+import { openNativeProject, readNativeProject, listReplayArchives, saveNativeProject, deleteNativeProject, rememberNativeSession, reopenNativeSession, type SavedReplayEntry } from "./native/files.ts";
 import { chooseSavesDirectory, getDefaultSavesDirectory } from "./utils/file.ts";
 import { clearNativeJournal, readNativeJournal, writeNativeJournal } from "./native/journal.ts";
 import "./native.css";
@@ -25,8 +25,20 @@ const EMPTY_PROFILE: CropProfile = {
   world: [111, 436, 856, 1230], handCentersX: [211, 354, 497, 640], enemyHandReversed: true
 };
 
+function desktopScale():number {
+  // Keep the desktop proportions on short or DPI-scaled windows instead of
+  // letting fixed-size hands and controls squeeze only the arena.
+  return Math.min(1,window.innerHeight/960,window.innerWidth/1280);
+}
+
 export default function NativeApp() {
   const {t, language, toggle, renderMessage} = useI18n();
+  const [uiScale,setUiScale]=useState(desktopScale);
+  useEffect(()=>{
+    const resize=()=>setUiScale(desktopScale());
+    window.addEventListener('resize',resize);
+    return ()=>window.removeEventListener('resize',resize);
+  },[]);
   const history = useRef(new EditHistory());
   const [historyRevision, setHistoryRevision] = useState(0);
   const refreshHistory = () => setHistoryRevision(value => value + 1);
@@ -36,6 +48,10 @@ export default function NativeApp() {
   const pendingCreation = useRef<NativeCreationInput | null>(null);
   const [bridge, setBridge] = useState<NativeBridge | null>(null);
   const [status, setStatus] = useState<BridgeStatus | null>(null);
+  function acceptStatus(value:BridgeStatus):void {
+    configureNativeCatalog(value.engineCatalog,value.identity);
+    setStatus(value);
+  }
   const [project, setProject] = useState<NativeReplayProject | null>(null);
   const [branch, setBranch] = useState<NativeWorkingBranch | null>(null);
   const [observation, setObservation] = useState<NativeObservation | null>(null);
@@ -46,7 +62,7 @@ export default function NativeApp() {
     selectionAudio.current = null;
   }, []);
   const [speed, setSpeed] = useState(1);
-  const [scrubRoute, setScrubRoute] = useState<{ nodeId: string; maxTick: number } | null>(null);
+  const [scrubRoute, setScrubRoute] = useState<NativePlaybackRoute | null>(null);
   const [filePath, setFilePath] = useState<string | null>(null);
   const [notice, setNotice] = useState<Message | string>(message("choose"));
   const [busy, setBusy] = useState(false);
@@ -62,6 +78,7 @@ export default function NativeApp() {
   const [matchDialog,setMatchDialog]=useState<'create'|'view'|null>(null);
   const initialized = useRef(false);
   const runtimeStartRequested = useRef(false);
+  const runtimePreparation = useRef<Promise<void>|null>(null);
   const busyRef = useRef(false);
   const controlRevision = useRef(0);
   const projectRef = useRef(project);
@@ -82,7 +99,7 @@ export default function NativeApp() {
     setSelected(null);
     const source = projectRef.current;
     const work = branchRef.current;
-    if (source && work?.actions.length) {
+    if (source && work?.actions.length && !scrubRouteRef.current) {
       void writeNativeJournal(source, work).catch((error) => setNotice(message("journalFailed",{detail:errorText(error,language)})));
     }
     void bridgeRef.current?.post("/v1/suspend").catch(() => undefined);
@@ -105,7 +122,7 @@ export default function NativeApp() {
   const frameRendered=useCallback((revision:number):void=>{
     if(revision===controlRevision.current && !busyRef.current)setFramePending(false);
   },[]);
-  function putScrubRoute(value: { nodeId: string; maxTick: number } | null): void {
+  function putScrubRoute(value:NativePlaybackRoute | null): void {
     scrubRouteRef.current = value;
     setScrubRoute(value);
   }
@@ -117,6 +134,13 @@ export default function NativeApp() {
     try { await work(); }
     catch (error) {
       setFramePending(false);
+      if(!(error instanceof NativeUiError && ['requestFailed','replayFailed','frameFailed'].includes(error.code))) {
+        await bridgeRef.current?.recordFailure('desktop-action',error);
+      }
+      if(error instanceof NativeUiError && error.code==='engineMismatch') {
+        setScreen('home');setArchiveOpen(false);
+        putObservation(null);initialized.current=false;
+      }
       if(error instanceof NativeUiError && ["requestFailed","replayFailed","frameFailed"].includes(error.code))interrupt(t("interrupted"));
       setNotice(error instanceof UndoRecoveryError ? message(error.recovered?"undoRestored":"undoFailed") : message("failed",{detail:errorText(error,language)}));
     }
@@ -131,15 +155,19 @@ export default function NativeApp() {
       }
       throw new Error(t("snapshotMismatch"));
     }
+    await storeSnapshot(client, nodeId, receipt.handle);
+  }
+
+  async function storeSnapshot(client: NativeBridge, nodeId: string, handle: number): Promise<void> {
     const previous = snapshots.current.get(nodeId);
-    if (previous) await client.post("/v1/snapshot-release", { handle: previous }).catch(() => undefined);
+    if (previous && previous !== handle) await client.post("/v1/snapshot-release", { handle: previous }).catch(() => undefined);
     snapshots.current.delete(nodeId);
-    snapshots.current.set(nodeId, receipt.handle);
+    snapshots.current.set(nodeId, handle);
     if (snapshots.current.size > 32) {
       const oldest = [...snapshots.current.entries()].find(([id])=>id!==projectRef.current?.rootNodeId);
       if (oldest) {
         snapshots.current.delete(oldest[0]);
-        await client.post("/v1/snapshot-release", { handle: oldest[1] });
+        await client.post("/v1/snapshot-release", { handle: oldest[1] }).catch(() => undefined);
       }
     }
   }
@@ -152,38 +180,65 @@ export default function NativeApp() {
     }
   }
 
+  async function retainSnapshots(client: NativeBridge, previous: NativeReplayProject | null, next: NativeReplayProject): Promise<void> {
+    for (const [id, handle] of snapshots.current) {
+      if (previous && canReuseNativeSnapshot(previous, next, id)) continue;
+      snapshots.current.delete(id);
+      await client.post("/v1/snapshot-release", { handle }).catch(() => undefined);
+    }
+  }
+
   async function replayTo(client: NativeBridge, source: NativeReplayProject, nodeId: string,
                           actions: NativeBattleAction[], targetTick: number,
                           expectedDigest?: string): Promise<NativeObservation> {
     setNotice(message("restoring",{time:formatNativeTick(targetTick)}));
     const path = nativePathToNode(source, nodeId);
-    const targetNode = expectedDigest && path.find((node) =>
+    const targetNode = expectedDigest && [...path].reverse().find((node) =>
       node.finalTick === targetTick && node.stateDigest === expectedDigest);
     const cacheTarget = async (): Promise<void> => {
       if (targetNode && !snapshots.current.has(targetNode.id)) {
         await rememberSnapshot(client, targetNode.id, targetNode.finalTick).catch(() => undefined);
       }
     };
-    const base = nearestNativeSnapshotNode(source, nodeId, targetTick, new Set(snapshots.current.keys()));
-    if (base) {
-      try {
-        const state = await client.replay(source.match.seed,
-          actions.filter((action) => action.tick > base.finalTick && action.tick <= targetTick),
-          targetTick, expectedDigest, snapshots.current.get(base.id), base.finalTick, base.stateDigest, source.match);
+    const restore = async (base?: (typeof path)[number]): Promise<NativeObservation> => {
+      // Cache nodes while already traversing their history. Never replay other
+      // branches in the background or make the user visit every ancestor first.
+      const missing = path.filter(node => node.finalTick >= (base?.finalTick ?? 0) &&
+        node.finalTick <= targetTick && !snapshots.current.has(node.id));
+      const root = missing.find(node => node.id === source.rootNodeId);
+      const candidates = root ? [root, ...missing.filter(node => node !== root).slice(-31)] :
+        missing.slice(-(snapshots.current.has(source.rootNodeId) ? 31 : 32));
+      const checkpoints = candidates
+        .map(node => ({nodeId:node.id, tick:node.finalTick, digest:node.stateDigest}));
+      const {snapshots: receipts = [], ...state} = await client.replay(source.match.seed,
+        actions.filter(action => action.tick > (base?.finalTick ?? 0) && action.tick <= targetTick),
+        targetTick, expectedDigest, base ? snapshots.current.get(base.id) : undefined,
+        base?.finalTick, base?.stateDigest, source.match, checkpoints);
+      if (base) {
         const used = snapshots.current.get(base.id)!;
         snapshots.current.delete(base.id);
         snapshots.current.set(base.id, used);
-        await cacheTarget();
-        return state;
+      }
+      for (const receipt of receipts) {
+        const expected = checkpoints.find(checkpoint => checkpoint.nodeId === receipt.nodeId);
+        if (expected && receipt.tick === expected.tick && receipt.digest === expected.digest &&
+            Number.isSafeInteger(receipt.handle) && receipt.handle > 0) {
+          await storeSnapshot(client, receipt.nodeId, receipt.handle);
+        }
+      }
+      await cacheTarget();
+      return state;
+    };
+    const base = nearestNativeSnapshotNode(source, nodeId, targetTick, new Set(snapshots.current.keys()));
+    if (base) {
+      try {
+        return await restore(base);
       } catch {
         // A new native battle invalidates every process-scoped snapshot handle.
       }
     }
     await releaseSnapshots(client);
-    const state = await client.replay(source.match.seed,
-      actions.filter((action) => action.tick <= targetTick), targetTick, expectedDigest, undefined, undefined, undefined, source.match);
-    await cacheTarget();
-    return state;
+    return restore();
   }
 
   useEffect(() => { void refreshArchives(); }, []);
@@ -207,24 +262,39 @@ export default function NativeApp() {
   }
 
   async function startRuntime(): Promise<void> {
-    setNotice(message("autoConnectLead"));
-    try {
-      const client = bridgeRef.current ?? await NativeBridge.launch();
-      bridgeRef.current = client;
-      const latest = await client.get<BridgeStatus>("/v1/status");
-      setStatus(latest);
-      setBridge(client);
-      connectionErrorRef.current = null;
-      setConnectionError(null);
-      runtimeStartRequested.current = Boolean(latest.environmentConfigured && latest.resourcesConfigured) &&
-        latest.setup?.state !== "installing" && latest.setup?.state !== "importing";
-      if (runtimeStartRequested.current && !latest.ready) {
-        setStatus(await client.post<BridgeStatus>("/v1/start"));
+    if(runtimePreparation.current)return runtimePreparation.current;
+    const preparation=(async()=>{
+      setNotice(message("autoConnectLead"));
+      try {
+        const client = bridgeRef.current ?? await NativeBridge.launch();
+        bridgeRef.current = client;
+        const latest = await client.get<BridgeStatus>("/v1/status");
+        acceptStatus(latest);
+        setBridge(client);
+        connectionErrorRef.current = null;
+        setConnectionError(null);
+        runtimeStartRequested.current = Boolean(latest.environmentConfigured && latest.resourcesConfigured) &&
+          latest.setup?.state !== "installing" && latest.setup?.state !== "importing";
+        if ((latest.ready && latest.error) || (runtimeStartRequested.current && !latest.ready)) {
+          acceptStatus(await client.post<BridgeStatus>("/v1/start"));
+        }
+      } catch (error) {
+        runtimeStartRequested.current = false;
+        interrupt(errorText(error,language));
+        throw error;
       }
-    } catch (error) {
-      runtimeStartRequested.current = false;
-      interrupt(errorText(error,language));
-      throw error;
+    })();
+    runtimePreparation.current=preparation;
+    try {await preparation;}
+    finally {if(runtimePreparation.current===preparation)runtimePreparation.current=null;}
+  }
+
+  function beginCreation():void {
+    setMatchDialog('create');
+    if(screen==='home'&&!bridgeRef.current&&!connectionErrorRef.current) {
+      // Preparing while the user chooses cards overlaps the cold connection
+      // without creating a match, a file, or another game process.
+      void startRuntime().catch(error=>setNotice(message('failed',{detail:errorText(error,language)})));
     }
   }
 
@@ -243,13 +313,14 @@ export default function NativeApp() {
     if (connectionErrorRef.current && observationRef.current) throw new NativeUiError("interrupted");
     if (bridgeRef.current && observationRef.current) {
       const state = await bridgeRef.current.post<NativeObservation>("/v1/pause");
-      work = advanceNativeWork(work, state.tick);
+      const edgeId=scrubRouteRef.current?.edgeId;
+      work = edgeId?nativeEdgeBranch(source,edgeId,state.tick):advanceNativeWork(work, state.tick);
       putObservation(state); putBranch(work);
       setStatus(previous => previous ? { ...previous, playing: false } : previous);
     }
     // Retain the draft as a journal; returning home never creates a checkpoint.
     const path = await saveNativeProject(source, filePath);
-    if (work.actions.length) await writeNativeJournal(source, work);
+    if (!scrubRouteRef.current && work.actions.length) await writeNativeJournal(source, work);
     setFilePath(path);
     rememberNativeSession(path, work.checkedOutNodeId);
   }
@@ -268,7 +339,7 @@ export default function NativeApp() {
   }, [filePath, branch?.checkedOutNodeId]);
 
   useEffect(() => {
-    if (!bridge || screen === "home") return;
+    if (!bridge || (screen === "home" && matchDialog !== 'create')) return;
     let alive = true;
     let refreshing = false;
     const refresh = async () => {
@@ -278,14 +349,22 @@ export default function NativeApp() {
         const revision = controlRevision.current;
         const latest = await bridge.get<BridgeStatus>("/v1/status");
         if (!alive || busyRef.current || revision !== controlRevision.current) return;
-        setStatus(latest);
+        configureNativeCatalog(latest.engineCatalog,latest.identity);
+        // A completed interval still needs its endpoint observation before the
+        // UI can stop or continue. Keep Pause available during that short gap.
+        setStatus(previous => {
+          const next=scrubRouteRef.current?.edgeId && latest.playback?.completed
+            ? {...latest,playing:Boolean(previous?.playing)} : latest;
+          return JSON.stringify(previous)===JSON.stringify(next)?previous:next;
+        });
         if (latest.error) { setNotice(latest.error); interrupt(latest.error); }
+        if(screen==='home')return;
         if (!latest.ready && !runtimeStartRequested.current && !connectionErrorRef.current &&
             (screen === "setup" || pendingCreation.current || (projectRef.current && !initialized.current)) &&
             latest.environmentConfigured && latest.resourcesConfigured &&
             latest.setup?.state !== "installing" && latest.setup?.state !== "importing" && latest.setup?.state !== "failed") {
           runtimeStartRequested.current = true;
-          setStatus(await bridge.post<BridgeStatus>("/v1/start"));
+          acceptStatus(await bridge.post<BridgeStatus>("/v1/start"));
           return;
         }
         if (latest.ready && pendingCreation.current) {
@@ -306,14 +385,22 @@ export default function NativeApp() {
               }
               const upgraded=projectForCurrentEngine(journal?.recoveryProject ?? loaded,latest.identity);
               loaded=upgraded.project;
+              await retainSnapshots(bridge, projectRef.current, loaded);
               if(journal?.recoveryProject)putProject(journal.recoveryProject);
               const root = loaded.nodes[loaded.rootNodeId];
               const savedNode = loaded.nodes[recoveryNode.current ?? loaded.rootNodeId] ?? root;
               setNotice(message("restoringNode",{title:savedNode.title}));
-              let state = await bridge.replay(loaded.match.seed, [], root.finalTick, root.stateDigest, undefined, undefined, undefined, loaded.match);
-              await rememberSnapshot(bridge, root.id, root.finalTick);
-              if (savedNode.id !== root.id) {
+              let state: NativeObservation;
+              const cachedBase = nearestNativeSnapshotNode(loaded, savedNode.id, savedNode.finalTick, new Set(snapshots.current.keys()));
+              if (cachedBase) {
                 state = await replayTo(bridge, loaded, savedNode.id, nativeActionsToNode(loaded, savedNode.id), savedNode.finalTick, savedNode.stateDigest);
+              } else {
+                await releaseSnapshots(bridge);
+                state = await bridge.replay(loaded.match.seed, [], root.finalTick, root.stateDigest, undefined, undefined, undefined, loaded.match);
+                await rememberSnapshot(bridge, root.id, root.finalTick);
+                if (savedNode.id !== root.id) {
+                  state = await replayTo(bridge, loaded, savedNode.id, nativeActionsToNode(loaded, savedNode.id), savedNode.finalTick, savedNode.stateDigest);
+                }
               }
               if(upgraded.upgraded) {
                 const path=await saveNativeProject(loaded,null);
@@ -333,7 +420,8 @@ export default function NativeApp() {
                 await clearNativeJournal(original.projectId);
               }
               putObservation(state);putBranch(work);putProject(loaded);
-              recoveryNode.current=null;restoreCurrentDraft.current=false;putScrubRoute(null);
+              putScrubRoute(restoreCurrentDraft.current ? null : {nodeId:savedNode.id,maxTick:savedNode.finalTick});
+              recoveryNode.current=null;restoreCurrentDraft.current=false;
               setScreen("workspace");
               setNotice(message("loaded"));
             } else {
@@ -342,10 +430,19 @@ export default function NativeApp() {
           });
           if (projectRef.current && !observationRef.current) {initialized.current=false;interrupt(t("interrupted"));}
         }
-        if (latest.ready && latest.playing && !busyRef.current && observationRef.current && !connectionErrorRef.current) {
+        if (latest.ready && (latest.playing || (scrubRouteRef.current?.edgeId && latest.playback?.completed)) && !busyRef.current && observationRef.current && !connectionErrorRef.current) {
           const state = await bridge.get<NativeObservation>("/v1/observe");
           if (!alive || busyRef.current || revision !== controlRevision.current) return;
           putObservation(state);
+          const edgeId=scrubRouteRef.current?.edgeId;
+          if(edgeId && projectRef.current) {
+            const child=projectRef.current.nodes[edgeId];
+            putBranch(nativeEdgeBranch(projectRef.current,edgeId,state.tick));
+            if(latest.playback?.completed && latest.playback.targetTick===child.finalTick) {
+              await exclusive(()=>arriveAtEdgeEnd(state,true));
+            }
+            return;
+          }
           const work = branchRef.current;
           if (work && state.tick >= work.workingTick) {
             const next = advanceNativeWork(work, state.tick);
@@ -362,15 +459,15 @@ export default function NativeApp() {
     void refresh();
     const interval = window.setInterval(() => { void refresh(); }, 100);
     return () => { alive = false; window.clearInterval(interval); };
-  }, [bridge, interrupt, screen, language, status?.ready]);
+  }, [bridge, interrupt, screen, language, status?.ready, matchDialog]);
 
   async function reconnect(): Promise<void> {
     await exclusive(async () => {
       if(projectRef.current && branchRef.current) {
         setFilePath(await saveNativeProject(projectRef.current,filePath));
-        if(branchRef.current.actions.length)await writeNativeJournal(projectRef.current,branchRef.current);
+        if(!scrubRouteRef.current && branchRef.current.actions.length)await writeNativeJournal(projectRef.current,branchRef.current);
       }
-      restoreCurrentDraft.current = Boolean(observationRef.current || branchRef.current?.actions.length);
+      restoreCurrentDraft.current = !scrubRouteRef.current && Boolean(observationRef.current || branchRef.current?.actions.length);
       recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
       snapshots.current.clear();
       initialized.current = false;
@@ -391,10 +488,10 @@ export default function NativeApp() {
       if (!directory || Array.isArray(directory)) return;
       if (projectRef.current && branchRef.current) {
         setFilePath(await saveNativeProject(projectRef.current,filePath));
-        if(branchRef.current.actions.length)await writeNativeJournal(projectRef.current, branchRef.current);
+        if(!scrubRouteRef.current && branchRef.current.actions.length)await writeNativeJournal(projectRef.current, branchRef.current);
       }
       await invoke("configure_native_runtime", { directory }).catch(error=>{throw new NativeUiError("runtimeFailed",String(error));});
-      restoreCurrentDraft.current = Boolean(observationRef.current || branchRef.current?.actions.length);
+      restoreCurrentDraft.current = !scrubRouteRef.current && Boolean(observationRef.current || branchRef.current?.actions.length);
       recoveryNode.current = branchRef.current?.checkedOutNodeId ?? null;
       snapshots.current.clear();
       initialized.current = false;
@@ -403,7 +500,7 @@ export default function NativeApp() {
       bridgeRef.current = client;
       runtimeStartRequested.current=true;
       setBridge(client);
-      setStatus(await client.post<BridgeStatus>("/v1/start"));
+      acceptStatus(await client.post<BridgeStatus>("/v1/start"));
       connectionErrorRef.current = null;
       setConnectionError(null);
       setBridge(client);
@@ -464,8 +561,9 @@ export default function NativeApp() {
     });
   }
 
-  const profile = status?.cropProfile ?? EMPTY_PROFILE;
+  const profile = observation?.cropProfile ?? status?.cropProfile ?? EMPTY_PROFILE;
   const currentNode = project && branch ? project.nodes[branch.checkedOutNodeId] : null;
+  const currentEdge = project && scrubRoute?.edgeId ? project.nodes[scrubRoute.edgeId] : null;
 
   async function newProject(input:NativeCreationInput):Promise<void> {
     restoreCurrentDraft.current = false;
@@ -490,7 +588,7 @@ export default function NativeApp() {
         previousWork=advanceNativeWork(previousWork,previousState.tick);
         putBranch(previousWork);putObservation(previousState);
         await saveNativeProject(previous,filePath);
-        if(previousWork.actions.length)await writeNativeJournal(previous,previousWork);
+        if(!scrubRouteRef.current && previousWork.actions.length)await writeNativeJournal(previous,previousWork);
       }
       await releaseSnapshots(bridge);
       // A fixed verified deal seed keeps native omission rules reproducible.
@@ -535,7 +633,9 @@ export default function NativeApp() {
       await exclusive(async () => {
         const state = await bridgeRef.current!.post<NativeObservation>("/v1/pause");
         putObservation(state);
-        if (branchRef.current) putBranch(advanceNativeWork(branchRef.current, state.tick));
+        const edgeId=scrubRouteRef.current?.edgeId;
+        if (branchRef.current) putBranch(edgeId?nativeEdgeBranch(projectRef.current!,edgeId,state.tick):advanceNativeWork(branchRef.current, state.tick));
+        if(edgeId && state.tick===projectRef.current!.nodes[edgeId].finalTick)await arriveAtEdgeEnd(state,false);
         setStatus({ ...status, playing: false });
       });
     }
@@ -548,12 +648,35 @@ export default function NativeApp() {
     catch (error) { setArchiveError(errorText(error,language)); }
   }
 
+  async function removeArchive(entry: SavedReplayEntry): Promise<void> {
+    if (busyRef.current || confirmation) return;
+    const directory = archiveDirectory;
+    if (!await confirmOperation(message('confirmDeleteArchive', {title:entry.title,name:entry.name}))) return;
+    await exclusive(async () => {
+      try {
+        await deleteNativeProject(entry, directory);
+        // Drop the loaded copy so a later save/navigation cannot recreate the file.
+        if (filePath?.replace(/\\/g,'/').toLowerCase() === entry.path.replace(/\\/g,'/').toLowerCase()) {
+          putProject(null);putBranch(null);putObservation(null);putScrubRoute(null);
+          initialized.current=false;recoveryNode.current=null;restoreCurrentDraft.current=false;
+          pendingCreation.current=null;setFilePath(null);setSelected(null);setFramePending(false);
+          setArchiveOpen(false);setScreen('home');
+          if (bridgeRef.current) await releaseSnapshots(bridgeRef.current);
+        }
+        await refreshArchives();
+        setNotice(message('archiveDeleted',{title:entry.title}));
+      } catch (error) { setArchiveError(errorText(error,language)); }
+    });
+  }
+
   async function openProject(path?: string, continueSession = false): Promise<void> {
     await exclusive(async () => {
       const opened = continueSession ? await reopenNativeSession() : path ? await readNativeProject(path) : await openNativeProject();
       if (!opened) return;
       await preserveWorkspace();
-      if (bridgeRef.current) await releaseSnapshots(bridgeRef.current);
+      if (bridgeRef.current) {
+        await retainSnapshots(bridgeRef.current, projectRef.current, opened.project);
+      }
       const nodeId = "nodeId" in opened && typeof opened.nodeId === "string" ? opened.nodeId : opened.project.rootNodeId;
       putProject(opened.project); putBranch(checkoutNativeNode(opened.project, nodeId));
       restoreCurrentDraft.current = false;
@@ -568,7 +691,7 @@ export default function NativeApp() {
 
   async function saveProject(): Promise<void> {
     if (!projectRef.current) return;
-    if(bridge && status?.ready && branchRef.current && !connectionErrorRef.current && (status.playing || branchRef.current.workingTick>projectRef.current.nodes[branchRef.current.checkedOutNodeId].finalTick)) {
+    if(!scrubRouteRef.current && bridge && status?.ready && branchRef.current && !connectionErrorRef.current && (status.playing || branchRef.current.workingTick>projectRef.current.nodes[branchRef.current.checkedOutNodeId].finalTick)) {
       await checkpoint();return;
     }
     await exclusive(async () => {
@@ -579,7 +702,7 @@ export default function NativeApp() {
   }
 
   async function checkpoint(): Promise<void> {
-    if (!bridge || !projectRef.current || !branchRef.current) return;
+    if (!bridge || !projectRef.current || !branchRef.current || scrubRouteRef.current) return;
     await exclusive(async () => {
       const state = await bridge.post<NativeObservation>("/v1/pause");
       putObservation(state);
@@ -602,17 +725,15 @@ export default function NativeApp() {
     });
   }
 
-  async function checkout(nodeId: string): Promise<void> {
-    if (!bridge || !projectRef.current || !branchRef.current ||
-        (nodeId === branchRef.current.checkedOutNodeId && !scrubRouteRef.current)) return;
-    const work = branchRef.current;
-
-    await exclusive(async () => {
+  // Called inside one exclusive action, including when selecting an edge.
+  async function restoreNode(nodeId:string):Promise<void> {
+      const client=bridgeRef.current!;
+      const work=branchRef.current!;
       let activeProject = projectRef.current!;
-      if (!scrubRouteRef.current && (work.actions.length || (activeProject.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>activeProject.nodes[work.checkedOutNodeId].finalTick))) {
-        const state = await bridge.post<NativeObservation>("/v1/pause");
+      if (!scrubRouteRef.current && work.workingTick>activeProject.nodes[work.checkedOutNodeId].finalTick) {
+        const state = await client.post<NativeObservation>("/v1/pause");
         const saved = createNativeCheckpoint(activeProject, advanceNativeWork(work, state.tick), state.digest);
-        await rememberSnapshot(bridge, saved.node.id, state.tick);
+        await rememberSnapshot(client, saved.node.id, state.tick);
         const savedPath = await saveNativeProject(saved.project, filePath);
         activeProject = saved.project;
         putProject(activeProject);
@@ -621,15 +742,71 @@ export default function NativeApp() {
         setFilePath(savedPath);
         await clearNativeJournal(activeProject.projectId);
       }
-      if(status)setStatus({...status,playing:false});
+      setStatus(previous=>previous?{...previous,playing:false}:previous);
       const node = activeProject.nodes[nodeId];
-      const state = await replayTo(bridge, activeProject, nodeId,
+      const state = await replayTo(client, activeProject, nodeId,
         nativeActionsToNode(activeProject, nodeId), node.finalTick, node.stateDigest);
       putObservation(state);
       putBranch(checkoutNativeNode(activeProject, nodeId));
-      putScrubRoute(null);
+      putScrubRoute({nodeId:node.id,maxTick:node.finalTick});
       setSelected(null);
       setNotice(message("restoredNode",{title:node.title}));
+  }
+
+  async function checkout(nodeId: string): Promise<void> {
+    if (!bridge || !projectRef.current?.nodes[nodeId] || !branchRef.current) return;
+    await exclusive(async()=>{
+      await restoreNode(nodeId);
+      await continueFromNode();
+    });
+  }
+
+  async function continueFromNode():Promise<void> {
+    if(observationRef.current!.finalized)return;
+    await bridgeRef.current!.post('/v1/resume');
+    putScrubRoute(null);
+    setStatus(previous=>previous?{...previous,playing:true}:previous);
+    setNotice(message('simulatingNode',{title:projectRef.current!.nodes[branchRef.current!.checkedOutNodeId].title}));
+  }
+
+  async function beginEdge(childId:string,before:NativeObservation):Promise<void> {
+    const source=projectRef.current!,target=source.nodes[childId],parent=source.nodes[target.parentId!];
+    if(before.tick<parent.finalTick || before.tick>target.finalTick ||
+       (before.tick===parent.finalTick && before.digest!==parent.stateDigest))throw new NativeUiError('replayFailed',t('edgeBaseMismatch'));
+    const state=await bridgeRef.current!.post<NativeObservation&{playing:boolean}>('/v1/playback',{
+      actions:target.actionsFromParent.filter(action=>action.tick>before.tick),targetTick:target.finalTick,
+      expectedTick:before.tick,baseDigest:before.digest,expectedDigest:target.stateDigest});
+    putScrubRoute({nodeId:target.id,maxTick:target.finalTick,edgeId:target.id});
+    putObservation(state);putBranch(nativeEdgeBranch(source,target.id,state.tick));setSelected(null);
+    setStatus(previous=>previous?{...previous,playing:state.playing}:previous);
+    setNotice(message('playingEdge',{from:parent.title,to:target.title}));
+  }
+
+  async function arriveAtEdgeEnd(state:NativeObservation,continueSimulation:boolean):Promise<void> {
+    const source=projectRef.current!,child=source.nodes[scrubRouteRef.current!.edgeId!];
+    if(state.tick!==child.finalTick || state.digest!==child.stateDigest)throw new NativeUiError('replayFailed',t('edgeBaseMismatch'));
+    putBranch(checkoutNativeNode(source,child.id));
+    const waitForChoice=child.childIds.length>1;
+    putScrubRoute(waitForChoice||state.finalized?{nodeId:child.id,maxTick:child.finalTick}:null);
+    setStatus(previous=>previous?{...previous,playing:false}:previous);
+    if(continueSimulation && !waitForChoice && !state.finalized) {
+      await continueFromNode();
+    } else {
+      setNotice(message(state.finalized?'replayEnded':waitForChoice?'chooseEdge':'edgeArrived',{title:child.title}));
+    }
+  }
+
+  async function playEdge(childId:string):Promise<void> {
+    const child=projectRef.current?.nodes[childId];
+    if(!bridge||!child?.parentId||busyRef.current)return;
+    await exclusive(async()=>{
+      if(scrubRouteRef.current?.edgeId===childId && observationRef.current!.tick<child.finalTick) {
+        if(!status?.playing)await beginEdge(childId,observationRef.current!);
+        return;
+      }
+      const parent=projectRef.current!.nodes[child.parentId!],before=observationRef.current;
+      if(status?.playing || !before || before.tick!==parent.finalTick || before.digest!==parent.stateDigest)await restoreNode(parent.id);
+      await beginEdge(childId,observationRef.current!);
     });
   }
 
@@ -644,23 +821,42 @@ export default function NativeApp() {
         putObservation(state);
         setStatus({ ...status, playing: false });
         if (branchRef.current) {
-          const work = advanceNativeWork(branchRef.current, state.tick);
-          if (projectRef.current && work.actions.length) await writeNativeJournal(projectRef.current, work);
+          const edgeId=scrubRouteRef.current?.edgeId;
+          const work = edgeId&&projectRef.current?nativeEdgeBranch(projectRef.current,edgeId,state.tick):advanceNativeWork(branchRef.current, state.tick);
+          if (!scrubRouteRef.current && projectRef.current && work.actions.length) await writeNativeJournal(projectRef.current, work);
           putBranch(work);
+          if(edgeId && state.tick===projectRef.current!.nodes[edgeId].finalTick)await arriveAtEdgeEnd(state,false);
         }
       } else {
-        await bridge.post("/v1/resume");
-        putScrubRoute(null);
+        const route=scrubRouteRef.current,source=projectRef.current,work=branchRef.current;
+        if(route?.edgeId && observationRef.current && observationRef.current.tick<route.maxTick) {
+          await beginEdge(route.edgeId,observationRef.current);
+          return;
+        } else {
+          const node=source&&work?source.nodes[work.checkedOutNodeId]:null;
+          if(route && node) {
+            if(!observationRef.current!.finalized && node.childIds.length<=1)await continueFromNode();
+            else setNotice(message(observationRef.current!.finalized?'replayEnded':'chooseEdge',{title:node.title}));
+            return;
+          }
+          await bridge.post("/v1/resume");
+          putScrubRoute(null);
+        }
         setStatus({ ...status, playing: true });
       }
     });
   }
 
   async function stepForward(): Promise<void> {
-    if (!bridge || !branchRef.current || !observationRef.current || status?.playing || framePending) return;
+    if (!bridge || !branchRef.current || !observationRef.current || observationRef.current.finalized || status?.playing || framePending) return;
     const beforeTick=observationRef.current.tick;
     const route=scrubRouteRef.current;
-    if(route && beforeTick<route.maxTick) {
+    const node=projectRef.current?.nodes[branchRef.current.checkedOutNodeId];
+    if(route && !route.edgeId && node && beforeTick===node.finalTick && node.childIds.length>1) {
+      setNotice(message('chooseEdge',{title:node.title}));
+      return;
+    }
+    if(route?.edgeId && beforeTick<route.maxTick) {
       await seek(beforeTick+1);
       return;
     }
@@ -680,19 +876,20 @@ export default function NativeApp() {
     });
   }
 
-  async function seek(targetTick: number): Promise<void> {
+  async function seek(targetTick: number,destinationId?:string): Promise<void> {
     if (!bridge || !projectRef.current || !branchRef.current || !observationRef.current) return;
     await exclusive(async () => {
       let source = projectRef.current!;
       const work = branchRef.current!;
-      let route = scrubRouteRef.current;
+      let route = destinationId?{nodeId:destinationId,maxTick:source.nodes[destinationId].finalTick}:scrubRouteRef.current;
       const rootTick = source.nodes[source.rootNodeId].finalTick;
       if (!Number.isSafeInteger(targetTick) || targetTick < rootTick ||
           targetTick > (route?.maxTick ?? work.workingTick)) {
         throw new Error(t("seekInvalid"));
       }
       if (!route) {
-        if (work.actions.length && targetTick < work.workingTick) {
+        if(targetTick===work.workingTick)return;
+        if (work.workingTick>source.nodes[work.checkedOutNodeId].finalTick) {
           const paused = await bridge.post<NativeObservation>("/v1/pause");
           const saved = createNativeCheckpoint(source, advanceNativeWork(work, paused.tick), paused.digest);
           await rememberSnapshot(bridge, saved.node.id, paused.tick);
@@ -718,6 +915,9 @@ export default function NativeApp() {
       const nextWork = { checkedOutNodeId: base.id, workingTick: targetTick,
         actions: actions.filter((action) => action.tick > base.finalTick) };
       putBranch(nextWork);
+      const atNode=path.some(node=>node.finalTick===targetTick);
+      const edge=atNode?null:path.find(node=>node.parentId&&source.nodes[node.parentId].finalTick<targetTick&&targetTick<node.finalTick);
+      putScrubRoute({nodeId:route.nodeId,maxTick:route.maxTick,...(edge?{edgeId:edge.id}:{})});
       if (status) setStatus({ ...status, playing: false });
       setSelected(null);
       setNotice(message("sought",{time:formatNativeTick(state.tick)}));
@@ -733,7 +933,7 @@ export default function NativeApp() {
   }
 
   function selectHand(owner:0|1,slot:number):void {
-    if(connectionErrorRef.current || busyRef.current || framePending || !status?.ready)return;
+    if(scrubRouteRef.current || connectionErrorRef.current || busyRef.current || framePending || !status?.ready)return;
     const player=observationRef.current?.players.find(player=>player.owner===owner);
     const card=player?.hand.find(card=>card.slot===slot);
     if(!player||!card||player.elixir<card.cost*10000)return;
@@ -766,9 +966,10 @@ export default function NativeApp() {
     await exclusive(async()=>{
       const state=await bridge.post<NativeObservation>('/v1/pause');
       const beforeProject=projectRef.current!;
-      const beforeWork=advanceNativeWork(branchRef.current!,state.tick);
+      const edgeId=scrubRouteRef.current?.edgeId;
+      const beforeWork=edgeId?nativeEdgeBranch(beforeProject,edgeId,state.tick):advanceNativeWork(branchRef.current!,state.tick);
       let source=beforeProject,work=beforeWork;
-      if(source.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>source.nodes[work.checkedOutNodeId].finalTick) {
+      if(!edgeId && source.nodes[work.checkedOutNodeId].editableCopy && work.workingTick>source.nodes[work.checkedOutNodeId].finalTick) {
         const saved=createNativeCheckpoint(source,work,state.digest);
         source=saved.project;work=saved.branch;
         await rememberSnapshot(bridge,saved.node.id,state.tick);
@@ -776,7 +977,7 @@ export default function NativeApp() {
       const copied=copyNativeNode(source,work,state.digest);
       await rememberSnapshot(bridge,copied.node.id,state.tick);
       setFilePath(await saveNativeProject(copied.project,filePath));
-      history.current.push(structureEntry(beforeProject,copied.project,beforeWork,state.digest)); refreshHistory();
+      history.current.push(structureEntry(beforeProject,copied.project,beforeWork,state.digest,scrubRouteRef.current??undefined)); refreshHistory();
       putProject(copied.project);putBranch(copied.branch);putObservation(state);putScrubRoute(null);setSelected(null);
       await clearNativeJournal(copied.project.projectId);
       if(status)setStatus({...status,playing:false});
@@ -798,7 +999,7 @@ export default function NativeApp() {
   }
 
   async function playAt(pixel: { x: number; y: number }): Promise<void> {
-    if (connectionErrorRef.current || busyRef.current || framePending || !status?.ready) return;
+    if (scrubRouteRef.current || connectionErrorRef.current || busyRef.current || framePending || !status?.ready) return;
     if (!selected || !bridge || !projectRef.current || !branchRef.current) return;
     const player=observationRef.current?.players.find(player=>player.owner===selected.owner);
     const card=player?.hand.find(card=>card.slot===selected.slot);
@@ -848,7 +1049,7 @@ export default function NativeApp() {
   }
 
   async function activateAbility(owner:0|1,entityId:number,abilityId:number):Promise<void> {
-    if (!bridge || !ready || !projectRef.current || !branchRef.current) return;
+    if (scrubRouteRef.current || !bridge || !ready || framePending || !projectRef.current || !branchRef.current) return;
     await exclusive(async()=>{
       const receipt=await bridge.post<{accepted:boolean;observation:NativeObservation;action?:Omit<NativeBattleAction,'id'>}>('/v1/activate-ability',{owner,entityId,abilityId});
       putObservation(receipt.observation);
@@ -866,7 +1067,7 @@ export default function NativeApp() {
   }
 
   async function removeNode(): Promise<void> {
-    if (!bridge || !projectRef.current || !branchRef.current) return;
+    if (!bridge || !projectRef.current || !branchRef.current || scrubRouteRef.current?.edgeId) return;
     const id = branchRef.current.checkedOutNodeId;
     const node = projectRef.current.nodes[id];
     if (!node.parentId || !await confirmOperation(message("confirmDelete",{title:node.title}))) return;
@@ -882,8 +1083,8 @@ export default function NativeApp() {
       const after = checkoutNativeNode(next,parentId);
       const state = await runUndoRestore(source,beforeWork,paused,after,next,next.nodes[parentId].stateDigest,
         async(p)=>{await saveNativeProject(p,filePath);});
-      history.current.push(structureEntry(source,next,beforeWork,paused.digest));refreshHistory();
-      putProject(next);putBranch(after);putObservation(state);putScrubRoute(null);setSelected(null);
+      history.current.push(structureEntry(source,next,beforeWork,paused.digest,scrubRouteRef.current??undefined));refreshHistory();
+      putProject(next);putBranch(after);putObservation(state);putScrubRoute({nodeId:parentId,maxTick:next.nodes[parentId].finalTick});setSelected(null);
       setNotice(message("deleted",{count:removed.length}));
     });
   }
@@ -925,9 +1126,11 @@ export default function NativeApp() {
       if(entry.kind==="metadata" || entry.kind==="position") {
         if(bridge && branchRef.current) {
           const state=await bridge.post<NativeObservation>("/v1/pause");
-          const work=advanceNativeWork(branchRef.current,state.tick);
+          const edgeId=scrubRouteRef.current?.edgeId;
+          const work=edgeId?nativeEdgeBranch(source,edgeId,state.tick):advanceNativeWork(branchRef.current,state.tick);
           putObservation(state);putBranch(work);setStatus(previous=>previous?{...previous,playing:false}:previous);
-          if(work.actions.length)await writeNativeJournal(source,work);
+          if(edgeId && state.tick===source.nodes[edgeId].finalTick)await arriveAtEdgeEnd(state,false);
+          if(!scrubRouteRef.current && work.actions.length)await writeNativeJournal(source,work);
         }
         if(!source.nodes[entry.nodeId])throw new Error(t("undoBlocked"));
         const next=updateNativeNodeMetadata(source,entry.nodeId,entry.kind==="position"?{position:entry.before}:{[entry.field]:entry.before});
@@ -952,7 +1155,9 @@ export default function NativeApp() {
         if(entry.kind==="action")after={...after,workingTick:paused.tick};
         const state=await runUndoRestore(source,before,paused,after,target,digest,
           entry.kind==="structure"?async(p)=>{await saveNativeProject(p,filePath);}:undefined);
-        putProject(target);putBranch(after);putObservation(state);putScrubRoute(null);setSelected(null);
+        putProject(target);putBranch(after);putObservation(state);
+        putScrubRoute(entry.kind==='structure'?entry.replay??null:null);setSelected(null);
+        if(entry.kind==='structure' && entry.replay)await clearNativeJournal(target.projectId);
       }
       history.current.pop();refreshHistory();setNotice(message("undone"));
     });
@@ -960,6 +1165,7 @@ export default function NativeApp() {
 
   useEffect(()=>{
     const keydown=(event:KeyboardEvent)=>{
+      if (confirmation && event.key === 'Escape') { event.preventDefault();finishConfirmation(false);return; }
       if((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==="z" && !event.shiftKey && !isTextUndoTarget(event.target) && screen==="workspace" && !helpOpen && !matchDialog && !archiveOpen && !confirmation) {
         event.preventDefault();void undo();
       }
@@ -974,18 +1180,20 @@ export default function NativeApp() {
   // A saved checkpoint and its paused draft share the same verified picture.
   // Tick/digest changes still force a fresh capture before controls are enabled.
   const nodeFrameKey = project && observation && !status?.playing
-    ? JSON.stringify([project.projectId,project.engine,observation.tick,observation.digest,profile.id]) : null;
+    ? JSON.stringify([project.projectId,project.engine,observation.tick,observation.digest,profile.id,profile.world,profile.arena]) : null;
   const connectingRuntime = Boolean(runtimeStartRequested.current && !status?.ready && !connectionError);
+  const restoringBattle = Boolean(status?.ready && project && !observation);
+  const connectionReady = Boolean(status?.ready && !restoringBattle);
   const settingUp = status?.setup?.state === "installing" || status?.setup?.state === "importing";
 
   const archiveContents = <>
       <div className="archive-tools"><button onClick={()=>{void refreshArchives();}} disabled={archiveLoading}>{t("refresh")}</button><button onClick={()=>{void changeArchiveDirectory();}} disabled={busy}>{t("folder")}</button><button onClick={()=>{void openProject();}} disabled={busy}>{t("otherFile")}</button></div>
       <div className="archive-directory">{archiveDirectory}</div>
       {archiveError && <p role="alert">{archiveError}</p>}
-      <div className="archive-list">{archiveLoading ? <p>{t("loading")}</p> : !archives.length ? <p>{t("empty")}</p> : archives.map(entry=><article className="archive-entry" key={entry.path}><div><strong>{entry.title}</strong><span>{entry.nodeCount} {t("nodes")} · {entry.updatedAt ? new Date(entry.updatedAt).toLocaleString(language) : "—"}</span><small>{entry.name}</small></div><button disabled={busy} onClick={()=>{void openProject(entry.path);}}>{t("open")}</button></article>)}</div>
+      <div className="archive-list">{archiveLoading ? <p>{t("loading")}</p> : !archives.length ? <p>{t("empty")}</p> : archives.map(entry=><article className="archive-entry" key={entry.path}><div><strong>{entry.title}</strong><span>{entry.nodeCount} {t("nodes")} · {entry.updatedAt ? new Date(entry.updatedAt).toLocaleString(language) : "—"}</span><small>{entry.name}</small></div><div className="archive-entry-actions"><button disabled={busy||Boolean(confirmation)} onClick={()=>{void openProject(entry.path);}}>{t("open")}</button><button className="archive-delete" disabled={busy||Boolean(confirmation)} onClick={()=>{void removeArchive(entry);}}>{t("deleteArchive")}</button></div></article>)}</div>
   </>;
 
-  return <div className="native-app">
+  return <div className="native-app" style={{zoom:uiScale,height:`${100/uiScale}vh`}}>
     <header className="native-header">
       <div className="native-brand"><img className="native-brand-icon" src="/app-icon.png" alt="" />
         <div><strong>{t("brand")}</strong><small>{t("subtitle")}</small></div></div>
@@ -995,7 +1203,7 @@ export default function NativeApp() {
         <button onClick={()=>setHelpOpen(true)}>{t("help")}</button>
         {screen !== "home" && <button onClick={()=>{void returnHome();}} disabled={busy}>{t("home")}</button>}
         {screen === "home" && <button onClick={()=>{void openProject(undefined, true);}} disabled={busy || !localStorage.getItem("clash-native.last-session")}>{t("continue")}</button>}
-        <button onClick={()=>setMatchDialog('create')} disabled={busy}>{t("new")}</button>
+        <button onClick={beginCreation} disabled={busy}>{t("new")}</button>
         {screen === "workspace" && <button onClick={() => { void showArchives(); }} disabled={busy}>{t("archives")}</button>}
         {screen === "workspace" && <button onClick={()=>setMatchDialog('view')} disabled={!project||busy}>{t("config")}</button>}
         {screen !== "setup" && <button onClick={() => { void showRuntime(); }} disabled={busy}>{t("runtime")}</button>}
@@ -1011,13 +1219,15 @@ export default function NativeApp() {
         <div className="panel-heading"><span>{t("branch")}</span><span>{project ? Object.keys(project.nodes).length : 0} {t("nodes")}</span></div>
         <div className="native-project-title">{project ? <input aria-label={t("projectName")} value={project.title} disabled={!ready||busy}
           onChange={(event) => putProject({ ...project, title: event.target.value, updatedAt: new Date().toISOString() })} /> : t("waiting")}</div>
-        {project && branch ? <NativeNodeTree project={project} selectedId={branch.checkedOutNodeId} disabled={!ready||busy} onSelect={id=>{void checkout(id);}} onMove={moveNode}/> : <div className="native-tree"/>}
+        {project && branch ? <NativeNodeTree project={project} selectedId={scrubRoute?.edgeId?null:branch.checkedOutNodeId} disabled={!ready||busy} onSelect={id=>{void checkout(id);}} onMove={moveNode}
+          onSelectEdge={id=>{void playEdge(id);}} speed={speed} activeEdge={scrubRoute?.edgeId&&observation?{childId:scrubRoute.edgeId,progress:nativeEdgeProgress(project,scrubRoute.edgeId,observation.tick),playing:Boolean(status?.playing)}:null}/> : <div className="native-tree"/>}
         <button className="wide-button" onClick={()=>{void copyNode();}} disabled={!ready||busy}>{t("copy")}</button>
         <button className="wide-button" onClick={() => { void checkpoint(); }}
-          disabled={!ready || busy || !branch || !currentNode || branch.workingTick <= currentNode.finalTick}>
+          disabled={!ready || busy || Boolean(scrubRoute) || !branch || !currentNode || branch.workingTick <= currentNode.finalTick}>
           {t("checkpoint")}
         </button>
-        {branch && branch.actions.length > 0 && <div className="draft-note">● {t("draft")} · {branch.actions.length} {t("confirmedActions")}</div>}
+        <button className="wide-button danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode?.parentId || busy || Boolean(scrubRoute?.edgeId)}>{t("delete")}</button>
+        {!scrubRoute && branch && branch.actions.length > 0 && <div className="draft-note">● {t("draft")} · {branch.actions.length} {t("confirmedActions")}</div>}
       </aside>
       <main className="native-main">
         <div className="battle-toolbar">
@@ -1029,19 +1239,14 @@ export default function NativeApp() {
             {t("own")} {ownElixir === undefined ? "—" : (ownElixir / 10000).toFixed(1)}
           </div>
         </div>
-        <div className="ability-toolbar">{observation?.players.flatMap(player=>(player.runtime?.abilityRuntime??[]).map(ability=>{
-          const entity=ability.championEntityKeys.find(key=>key);
-          return <button key={`${player.owner}-${ability.controllerSlot}`} disabled={!ready || busy || !entity || !ability.available || ability.remainingCooldownMs>0}
-            onClick={()=>{if(entity)void activateAbility(player.owner as 0|1,entity.secondaryIndex,ability.actionDataGlobalId);}}>{player.owner===1?t("own"):t("enemy")} · {NATIVE_CARD_CATALOG.find(card=>card.abilityNames.includes(ability.actionDataName))?.name??t("ability")}{ability.remainingCooldownMs>0?` · ${(ability.remainingCooldownMs/1000).toFixed(1)}s`:''}</button>;
-        }))}</div>
         <div className="battle-stage">{(!observation || screen === "setup") ? <section className="first-run-panel">
-          <div className={`first-run-symbol${status?.ready || connectionError || status?.setup?.error ? "" : " is-connecting"}`}>{status?.ready ? "✓" : <img src="/app-icon.png" alt="" />}</div>
-          <h2>{status?.ready ? t("runtimeReady") : t("autoConnecting")}</h2>
-          <p>{status?.ready ? t("environmentReadyLead") : t("autoConnectLead")}</p>
+          <div className={`first-run-symbol${connectionReady || connectionError || status?.setup?.error ? "" : " is-connecting"}`}>{connectionReady ? "✓" : <img src="/app-icon.png" alt="" />}</div>
+          <h2>{restoringBattle ? t("runtimeRestoring") : status?.ready ? t("runtimeReady") : t("autoConnecting")}</h2>
+          <p>{restoringBattle ? renderMessage(notice) : status?.ready ? t("environmentReadyLead") : t("autoConnectLead")}</p>
           <ol className="connection-steps" aria-label={t("connection")}>
             <li data-complete={Boolean(status?.environmentConfigured)}><span>{status?.environmentConfigured ? "✓" : "1"}</span><div><strong>{t("android")}</strong><small>{status?.environmentConfigured ? t("detected") : t("download")}</small></div></li>
             <li data-complete={Boolean(status?.resourcesConfigured)}><span>{status?.resourcesConfigured ? "✓" : "2"}</span><div><strong>{t("resources")}</strong><small>{status?.resourcesConfigured ? t("resourcesReady") : t("resourcesLead")}</small></div></li>
-            <li data-complete={Boolean(status?.ready)} aria-current={!status?.ready && status?.environmentConfigured && status?.resourcesConfigured ? "step" : undefined}><span>{status?.ready ? "✓" : "3"}</span><div><strong>{t("connection")}</strong><small role="status">{status?.ready ? t("runtimeReady") : stageText(language,status?.stageCode,status?.stage ?? t("bridge"))}</small></div></li>
+            <li data-complete={connectionReady} aria-current={!connectionReady && status?.environmentConfigured && status?.resourcesConfigured ? "step" : undefined}><span>{connectionReady ? "✓" : "3"}</span><div><strong>{t("connection")}</strong><small role="status">{restoringBattle ? t("runtimeRestoring") : status?.ready ? t("runtimeReady") : stageText(language,status?.stageCode,status?.stage ?? t("bridge"))}</small></div></li>
           </ol>
           {status && !status.environmentConfigured && !settingUp && <div className="setup-required">
             <label className="sdk-terms"><input type="checkbox" checked={acceptSdkTerms} disabled={busy} onChange={(event) => {setAcceptSdkTerms(event.target.checked);if(event.target.checked)void installEnvironment(true);}} />
@@ -1056,7 +1261,7 @@ export default function NativeApp() {
           </div>}
           {(status?.setup?.error || connectionError) && <p className="setup-error" role="alert">{t("runtimeFailed")}<small>{status?.setup?.error ?? connectionError}</small></p>}
           {connectionError && <div className="setup-actions"><button className="setup-primary" onClick={() => { void reconnect(); }} disabled={busy || settingUp}>{t("retry")}</button></div>}
-          {status?.ready && !project && !pendingCreation.current && <div className="setup-actions"><button className="setup-primary" onClick={()=>setMatchDialog("create")} disabled={busy}>{t("new")}</button></div>}
+          {status?.ready && !project && !pendingCreation.current && <div className="setup-actions"><button className="setup-primary" onClick={beginCreation} disabled={busy}>{t("new")}</button></div>}
           {status?.ready && initialized.current && observation && <div className="setup-actions"><button className="setup-primary" onClick={()=>setScreen("workspace")} disabled={busy}>{t("battle")}</button></div>}
           <details className="setup-advanced"><summary>{t("advancedOptions")}</summary>
             <div className="setup-actions"><button onClick={() => { void configureRuntime(); }} disabled={busy || settingUp || connectingRuntime}>{t("existingRuntime")}</button>
@@ -1068,7 +1273,7 @@ export default function NativeApp() {
             <p>{t("virtualization")}</p>
           </details>
         </section> : <NativeSurface bridge={bridge} ready={ready} profile={profile}
-          selected={selected} observation={observation} disabled={busy} paused={!status?.playing} framePending={framePending} frameRevision={controlRevision.current} frameCacheKey={nodeFrameKey} onFrameRendered={frameRendered} onSelectCard={selectHand} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
+          selected={selected} observation={observation} disabled={busy} readOnly={Boolean(scrubRoute)} paused={!status?.playing} framePending={framePending} frameRevision={controlRevision.current} frameCacheKey={nodeFrameKey} onFrameRendered={frameRendered} onSelectCard={selectHand} onActivateAbility={(owner,entityId,abilityId)=>{void activateAbility(owner,entityId,abilityId);}} onArenaClick={(pixel) => { void playAt(pixel); }} onUnavailable={interrupt} />}</div>
         {connectionError && observation && screen === "workspace" && <div className="native-recovery" role="alert">
           <span>{t("interrupted")}<small>{connectionError}</small></span><button onClick={() => { void reconnect(); }} disabled={busy}>{t("reconnect")}</button>
         </div>}
@@ -1091,13 +1296,16 @@ export default function NativeApp() {
       </main>
       <aside className="native-inspector">
         <div className="panel-heading"><span>{t("details")}</span></div>
-        {currentNode ? <>
+        {currentEdge && project ? <>
+          <p>{project.nodes[currentEdge.parentId!].title} → {currentEdge.title}</p>
+          <div className="inspector-stat"><span>{t("time")}</span><strong>{formatNativeTick(project.nodes[currentEdge.parentId!].finalTick)} → {formatNativeTick(currentEdge.finalTick)}</strong></div>
+          <div className="inspector-stat"><span>{t("segmentActions")}</span><strong>{currentEdge.actionsFromParent.length}</strong></div>
+        </> : currentNode ? <>
           <label>{t("title")}<input disabled={!ready||busy} onBlur={()=>history.current.endText()} value={currentNode.title} onChange={(event) => editNode({ title: event.target.value })} /></label>
           <div className="inspector-stat"><span>{t("time")}</span><strong>{formatNativeTick(currentNode.finalTick)}</strong></div>
           <div className="inspector-stat"><span>{t("segmentActions")}</span><strong>{currentNode.actionsFromParent.length}</strong></div>
           <label>{t("note")}<textarea disabled={!ready||busy} onBlur={()=>history.current.endText()} rows={8} value={currentNode.note}
             onChange={(event) => editNode({ note: event.target.value })} placeholder={t("noteHint")} /></label>
-          <button className="danger-button" onClick={() => { void removeNode(); }} disabled={!ready || !currentNode.parentId || busy}>{t("delete")}</button>
         </> : <p className="inspector-empty">{t("nodeEmpty")}</p>}
         <div className="runtime-card"><strong>{t("connection")}</strong>
           <span>{stageText(language,status?.stageCode,status?.stage ?? t("disconnected"))}</span>
@@ -1121,6 +1329,6 @@ export default function NativeApp() {
       <p>{t("helpLead")}</p>
       {(["helpStart", "helpDeck", "helpBattle", "helpTime", "helpNodes", "helpUndo", "helpSave", "helpKeys", "helpRuntime"] as const).map(key=><section key={key}><h3>{t(key)}</h3><p>{t(`${key}Body`)}</p></section>)}
     </section></div>}
-    {matchDialog && <NativeMatchDialog match={matchDialog==='view'?project?.match:undefined} busy={busy} ready={true} onClose={()=>setMatchDialog(null)} onCreate={input=>{void newProject(input);}}/>}
+    {matchDialog && <NativeMatchDialog key={status?.identity.protocolVersion??'native-bridge.v1'} match={matchDialog==='view'?project?.match:undefined} busy={busy} ready={Boolean(status)||!runtimePreparation.current} onClose={()=>setMatchDialog(null)} onCreate={input=>{void newProject(input);}}/>}
   </div>;
 }

@@ -1,6 +1,6 @@
 import { NativeUiError } from "./i18n.ts";
 import { isTauriDesktop } from "../utils/file.ts";
-import type { EngineIdentity, NativeBattleAction, NativeMatchConfig } from "../domain/nativeReplay.ts";
+import type { EngineIdentity, NativeBattleAction, NativeMatchConfig, NativeEngineCatalog } from "../domain/nativeReplay.ts";
 
 export interface CropProfile {
   id: string;
@@ -19,9 +19,12 @@ export interface BridgeStatus {
   stageCode?: string;
   ready: boolean;
   playing: boolean;
+  playback?: {targetTick:number;completed:boolean}|null;
   error: string | null;
   identity: EngineIdentity;
   cropProfile: CropProfile;
+  engineCatalog?: NativeEngineCatalog;
+  engineProfile?: string;
   capabilities: Record<string, boolean> | null;
   environmentConfigured?: boolean;
   resourcesConfigured?: boolean;
@@ -29,6 +32,7 @@ export interface BridgeStatus {
 }
 
 export interface NativeObservation {
+  cropProfile?: CropProfile;
   tick: number;
   digest: string;
   finalized: boolean;
@@ -44,6 +48,16 @@ export interface NativeAbility {
   championEntityKeys:({owner:number;objectIndex:number;secondaryIndex:number}|null)[];
 }
 
+export interface NativeReplayCheckpoint {
+  nodeId: string;
+  tick: number;
+  digest: string;
+}
+
+export interface NativeReplaySnapshot extends NativeReplayCheckpoint {
+  handle: number;
+}
+
 interface BridgeInfo {
   port: number;
   token: string;
@@ -53,7 +67,7 @@ interface BridgeInfo {
 export class NativeBridge {
   private info: BridgeInfo;
   // Survive workspace unmounts so returning from Home keeps verified node frames.
-  readonly frameCache = new Map<string, Blob>();
+  readonly frameCache = new Map<string, { image: Blob; cropped: boolean }>();
   private constructor(info: BridgeInfo) { this.info=info; }
 
   static async launch(): Promise<NativeBridge> {
@@ -73,19 +87,39 @@ export class NativeBridge {
   }
 
   async frame(fresh = false, signal?: AbortSignal): Promise<Blob> {
-    const response = await fetch(this.url(fresh?"/v1/frame?fresh=1":"/v1/frame"), {
+    const path=fresh?"/v1/frame?fresh=1":"/v1/frame";
+    try {
+    const response = await fetch(this.url(path), {
       headers: { Authorization: `Bearer ${this.info.token}` }, cache: "no-store",
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000)
     });
-    if (!response.ok) throw new NativeUiError("frameFailed",String(response.status));
-    return response.blob();
+    if (!response.ok) {
+      const result=await response.json().catch(()=>null);
+      throw new NativeUiError("frameFailed",result?.error||String(response.status));
+    }
+    return await response.blob();
+    } catch(error) {
+      if(!signal?.aborted)await this.recordFailure(path,error);
+      throw error;
+    }
+  }
+
+  async recordFailure(path:string,error:unknown):Promise<void> {
+    const detail=error instanceof Error?error.message:String(error);
+    const data={schema:'cr-native-client-failure.v1',createdAt:new Date().toISOString(),path,
+      code:error instanceof NativeUiError?error.code:'clientError',error:detail.split(this.info.token).join('<已隐藏>').slice(0,4000)};
+    try {
+      const {invoke}=await import('@tauri-apps/api/core');
+      await invoke('write_native_diagnostic',{data:JSON.stringify(data)});
+    } catch { /* Keep the original failure when diagnostics cannot be saved. */ }
   }
 
   async replay(seed: number, actions: NativeBattleAction[], targetTick: number,
                expectedDigest?: string, snapshotHandle?: number, baseTick?: number,
-               baseDigest?: string, match?: NativeMatchConfig): Promise<NativeObservation> {
+               baseDigest?: string, match?: NativeMatchConfig,
+               checkpoints?: NativeReplayCheckpoint[]): Promise<NativeObservation & { snapshots?: NativeReplaySnapshot[] }> {
     return this.post("/v1/replay", {
-      seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest,
+      seed, actions, targetTick, expectedDigest, snapshotHandle, baseTick, baseDigest, checkpoints,
       deck0: match?.deck0, deck1: match?.deck1, forms0:match?.forms0, forms1:match?.forms1, level:match?.level, dealMode:match?.dealMode, tower0:match?.tower0, tower1:match?.tower1
     });
   }
@@ -111,6 +145,7 @@ export class NativeBridge {
       if (!response.ok) throw new NativeUiError(code,result.error || String(response.status));
       return result as T;
     } catch(error) {
+      await this.recordFailure(path,error);
       if(error instanceof NativeUiError)throw error;
       throw new NativeUiError(code,String(error));
     }

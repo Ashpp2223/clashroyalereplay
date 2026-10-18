@@ -1,6 +1,6 @@
 import { useI18n, errorText } from './i18n.ts';
-import {useState} from 'react';
-import {DEFAULT_NATIVE_LEVEL,DEFAULT_NATIVE_TOWER,NATIVE_TOWER_CATALOG,NATIVE_CARD_CATALOG,STANDARD_NATIVE_DECK,nativeDeckSpecialSlots,validateNativeDeck,validateNativeForms,validateNativeDeal,validateNativeTower,type NativeMatchConfig} from '../domain/nativeReplay.ts';
+import {useRef,useState,type PointerEvent} from 'react';
+import {DEFAULT_NATIVE_LEVEL,DEFAULT_NATIVE_TOWER,NATIVE_TOWER_CATALOG,NATIVE_CARD_CATALOG,nativeDeckSpecialSlots,validateNativeDeck,validateNativeForms,validateNativeDeal,validateNativeTower,type NativeMatchConfig} from '../domain/nativeReplay.ts';
 
 export interface NativeCreationInput {
   title:string;deck0:number[];deck1:number[];forms0:number[];forms1:number[];
@@ -17,8 +17,10 @@ export default function NativeMatchDialog({match,busy,ready,onClose,onCreate}:{
   const [title,setTitle]=useState(t("newTitle"));
   const [side,setSide]=useState<0|1>(1);
   const [search,setSearch]=useState('');
-  const [decks,setDecks]=useState<number[][]>(match?[[...match.deck0],[...match.deck1]]:[[...STANDARD_NATIVE_DECK],[...STANDARD_NATIVE_DECK]]);
-  const [forms,setForms]=useState<number[][]>([match?.forms0?.slice()??Array(8).fill(0),match?.forms1?.slice()??Array(8).fill(0)]);
+  const gesture=useRef<{id:number;side:0|1;x:number;y:number;scale:number;moved:boolean}|null>(null);
+  const [drag,setDrag]=useState<{id:number;target:number|null;x:number;y:number}|null>(null);
+  const [decks,setDecks]=useState<number[][]>([match?.deck0.slice()??[],match?.deck1.slice()??[]]);
+  const [forms,setForms]=useState<number[][]>([match?.forms0?.slice()??Array(match?.deck0.length??0).fill(0),match?.forms1?.slice()??Array(match?.deck1.length??0).fill(0)]);
   const [towers,setTowers]=useState<number[]>([match?.tower0??DEFAULT_NATIVE_TOWER,match?.tower1??DEFAULT_NATIVE_TOWER]);
   const specialSlots=nativeDeckSpecialSlots(decks[side],forms[side]);
   function fitsSpecialSlots(cards:readonly number[],modes:readonly number[]):boolean {
@@ -53,11 +55,39 @@ export default function NativeMatchDialog({match,busy,ready,onClose,onCreate}:{
     return -1;
   }
   function move(index:number,direction:number):void {
-    if(readonly)return;
     const next=moveTarget(index,direction);if(next<0)return;
+    swapCards(index,next);
+  }
+  function swapCards(index:number,next:number):void {
+    if(readonly||busy||index<0||next<0||index===next||omitted(decks[side][index])!==omitted(decks[side][next]))return;
     const swap=(row:number[])=>{const copy=row.slice();[copy[index],copy[next]]=[copy[next],copy[index]];return copy;};
     setDecks(rows=>rows.map((row,owner)=>owner===side?swap(row):row));
     setForms(rows=>rows.map((row,owner)=>owner===side?swap(row):row));
+  }
+  function cancelDrag():void {gesture.current=null;setDrag(null);}
+  function startDrag(event:PointerEvent<HTMLDivElement>,id:number):void {
+    if(readonly||busy||event.button!==0||!event.isPrimary)return;
+    event.preventDefault();event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gesture.current={id,side,x:event.clientX,y:event.clientY,scale:event.currentTarget.getBoundingClientRect().width/event.currentTarget.offsetWidth,moved:false};
+  }
+  function dropTarget(event:PointerEvent<HTMLDivElement>):number|null {
+    const active=gesture.current;if(!active||active.side!==side)return null;
+    const target=event.currentTarget.ownerDocument.elementFromPoint(event.clientX,event.clientY)?.closest<HTMLElement>('.selected-deck-card');
+    const id=Number(target?.dataset.cardId);
+    return target&&target.parentElement===event.currentTarget.closest('.selected-deck')&&id!==active.id&&decks[side].includes(id)&&omitted(id)===omitted(active.id)?id:null;
+  }
+  function dragCard(event:PointerEvent<HTMLDivElement>):void {
+    const active=gesture.current;if(!active)return;
+    if(readonly||busy||active.side!==side){cancelDrag();return;}
+    const x=event.clientX-active.x,y=event.clientY-active.y;
+    if(Math.hypot(x,y)>5)active.moved=true;
+    if(active.moved)setDrag({id:active.id,target:dropTarget(event),x:x/active.scale,y:y/active.scale});
+  }
+  function finishDrag(event:PointerEvent<HTMLDivElement>):void {
+    const active=gesture.current,target=dropTarget(event);
+    if(active?.moved&&target!==null)swapCards(decks[side].indexOf(active.id),decks[side].indexOf(target));
+    cancelDrag();
   }
   return <div className="native-dialog-backdrop"><section className="native-dialog deck-dialog" role="dialog" aria-modal="true" aria-labelledby="match-heading">
     <div className="dialog-heading"><h2 id="match-heading">{readonly?t("config"):t("createTitle")}</h2><button onClick={onClose} disabled={busy}>{t("close")}</button></div>
@@ -73,16 +103,22 @@ export default function NativeMatchDialog({match,busy,ready,onClose,onCreate}:{
       const index=specialSlots.indexOf(slot),card=NATIVE_CARD_CATALOG.find(card=>card.id===decks[side][index]);
       return <div key={slot} className={`deck-special-slot ${slot}`} data-occupied={Boolean(card)}><strong>{t(slot)}</strong><small>{card?(language==='en-US'?card.engineName:card.name):t('unusedSlot')}</small></div>;
     })}</div>
-    <div className="deck-order-heading">{!readonly||match?.dealMode==='ordered'?t("order"):t("seededOrder")}</div>
+    <div className="deck-order-heading">{!readonly||match?.dealMode==='ordered'?t("order"):t("seededOrder")}{!readonly&&<> · {t("dragOrderHint")}</>}</div>
     <div className="selected-deck">{decks[side].map((id,index)=>{
       const card=NATIVE_CARD_CATALOG.find(card=>card.id===id)!,mode=forms[side][index]??0;
       const art=(mode===1?card.evolutionImage:mode===2?card.heroImage:card.image)??card.image;
-      return <article className="selected-deck-card" key={id} data-card-id={id} data-special-slot={specialSlots[index]??undefined}>
-        <div className="initial-card"><span>{index+1}</span>{art?<img src={art} alt=""/>:<div className="hand-card-fallback">{(language==="en-US"?card.engineName:card.name).slice(0,2)}</div>}<strong>{(language==="en-US"?card.engineName:card.name)}</strong><small>{card.cost} {t("elixir")}</small></div>
+      return <article className="selected-deck-card" key={id} data-card-id={id} data-special-slot={specialSlots[index]??undefined}
+        data-dragging={drag?.id===id||undefined} data-drop-target={drag?.target===id||undefined}
+        style={drag?.id===id?{transform:`translate(${drag.x}px,${drag.y}px)`}:undefined}>
+        <div className="initial-card" role={readonly?undefined:'button'} tabIndex={readonly||busy?undefined:0} aria-disabled={readonly?undefined:busy}
+          aria-label={readonly?undefined:t("dragCard",{card:language==="en-US"?card.engineName:card.name})} title={readonly?undefined:t("dragOrderHint")}
+          onPointerDown={event=>startDrag(event,id)} onPointerMove={dragCard} onPointerUp={finishDrag} onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
+          onKeyDown={event=>{if(event.key==='Escape')cancelDrag();else if(!gesture.current&&(event.key==='ArrowLeft'||event.key==='ArrowRight')){event.preventDefault();move(index,event.key==='ArrowLeft'?-1:1);}}}>
+          <span>{index+1}</span>{art?<img src={art} alt="" draggable={false}/>:<div className="hand-card-fallback">{(language==="en-US"?card.engineName:card.name).slice(0,2)}</div>}<strong>{(language==="en-US"?card.engineName:card.name)}</strong><small>{card.cost} {t("elixir")}</small></div>
         {readonly?<div className="initial-form">{card.rarity==='champion'?t("champion"):mode===1?t("evolution"):mode===2?t("hero"):t("normal")}</div>:<>
           {card.forms&&card.rarity!=='champion'?<select aria-label={t("formLabel",{side:t(side===1?"own":"enemy"),card:language==="en-US"?card.engineName:card.name})} value={mode} disabled={busy} onChange={event=>{const next=Number(event.target.value);if(canSetForm(index,next))setForms(rows=>rows.map((row,owner)=>owner===side?row.map((value,slot)=>slot===index?next:value):row));}}>
             <option value={0}>{t("normal")}</option>{Boolean(card.forms&1)&&<option value={1} disabled={!canSetForm(index,1)}>{t("evolution")}</option>}{Boolean(card.forms&2)&&<option value={2} disabled={!canSetForm(index,2)}>{t("hero")}</option>}</select>:<div className="initial-form">{t(card.rarity==='champion'?'champion':'normal')}</div>}
-          <div className="initial-order-tools"><button aria-label={t("moveBefore",{card:language==="en-US"?card.engineName:card.name})} disabled={busy||moveTarget(index,-1)<0} onClick={()=>move(index,-1)}>←</button><button aria-label={t("moveAfter",{card:language==="en-US"?card.engineName:card.name})} disabled={busy||moveTarget(index,1)<0} onClick={()=>move(index,1)}>→</button><button aria-label={t("removeCard",{card:language==="en-US"?card.engineName:card.name})} disabled={busy} onClick={()=>remove(index)}>×</button></div>
+          <div className="initial-order-tools"><button aria-label={t("removeCard",{card:language==="en-US"?card.engineName:card.name})} disabled={busy} onClick={()=>remove(index)}>×</button></div>
         </>}
       </article>;
     })}</div>

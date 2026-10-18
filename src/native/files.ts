@@ -25,6 +25,7 @@ export function isNativeProjectPath(path: string): boolean {
 
 export interface SavedReplayEntry {
   path: string;
+  projectId: string;
   title: string;
   name: string;
   updatedAt?: number;
@@ -36,10 +37,24 @@ export async function listReplayArchives(): Promise<SavedReplayEntry[]> {
   const entries = await Promise.all(files.map(async file => {
     try {
       const { project } = await readNativeProject(file.path);
-      return { ...file, title: project.title, nodeCount: Object.keys(project.nodes).length };
+      return { ...file, projectId: project.projectId, title: project.title, nodeCount: Object.keys(project.nodes).length };
     } catch { return null; }
   }));
   return entries.filter((entry): entry is SavedReplayEntry => entry !== null);
+}
+
+export async function deleteNativeProject(entry: SavedReplayEntry, directory: string): Promise<void> {
+  if (!isTauriDesktop()) throw new NativeUiError("desktopRequired");
+  if (!isNativeProjectPath(entry.path)) throw new NativeUiError("unsupported");
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("delete_native_project", { path: entry.path, directory, projectId: entry.projectId });
+  const stored = localStorage.getItem(LAST_SESSION);
+  if (stored) {
+    try {
+      const session = JSON.parse(stored);
+      if (typeof session.path === 'string' && session.path.replace(/\\/g, '/').toLowerCase() === entry.path.replace(/\\/g, '/').toLowerCase()) localStorage.removeItem(LAST_SESSION);
+    } catch { /* A malformed recent-session entry cannot prevent deletion. */ }
+  }
 }
 
 export async function saveNativeProject(project: NativeReplayProject, currentPath: string | null): Promise<string> {

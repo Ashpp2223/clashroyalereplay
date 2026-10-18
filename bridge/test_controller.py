@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 import unittest
+import threading
+from unittest.mock import Mock
 
-from bridge.controller import BattleController
+from bridge.controller import BattleController, observation
 
 
 @dataclass
@@ -21,13 +23,18 @@ class FakeEngine:
         self.next_handle = 1
         self.reset_count = 0
         self.pending_actions = []
+        self.playback_speed = 1
+        self.speed_changes = []
+        self.step_speeds = []
 
-    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None):
+    def reset(self, seed=1, deck0=None, deck1=None, forms0=None, forms1=None, level=None, tower0=None, tower1=None, *, warmup_speed=1):
+        self.configured_warmup_speed = warmup_speed
         self.configured_decks = (deck0, deck1)
         self.configured_forms = (forms0, forms1)
         self.configured_level = level
         self.configured_towers = (tower0,tower1)
         self.reset_count += 1
+        self.playback_speed = 1
         self.snapshots.clear()
         self.state = self._state(90, ())
         return self.state
@@ -38,6 +45,7 @@ class FakeEngine:
                                players=(player(0), player(1)), entities=(), plays=plays)
 
     def step(self, actions=(), ticks=1):
+        self.step_speeds.append(self.playback_speed)
         before = self.state.tick
         accepted = bool(actions) and not self.reject
         plays = tuple(SimpleNamespace(sequence=self.next_sequence + index, tick=before + 1, owner=action.owner,
@@ -56,6 +64,8 @@ class FakeEngine:
         return {"ok": True}
 
     def set_speed(self, multiplier):
+        self.playback_speed = multiplier
+        self.speed_changes.append(multiplier)
         return {"ok": True}
 
     def request(self, command):
@@ -70,6 +80,9 @@ class FakeEngine:
         if command.startswith("restore "):
             self.state = self.snapshots[int(command.split()[1])]
             return {"ok": True}
+        if command.startswith("release-snapshot "):
+            self.snapshots.pop(int(command.split()[1]), None)
+            return {"ok": True}
         return {"ok": True}
 
     def _capture(self):
@@ -80,11 +93,278 @@ class FakeEngine:
 
 
 class ControllerTest(unittest.TestCase):
+    def test_paused_keepalive_reads_same_connection_without_changing_battle(self):
+        native=SimpleNamespace(connection=object(),status=Mock(return_value={'ok':True}))
+        self.engine.native=native
+        before=self.controller.observe()
+        self.assertTrue(self.controller.keepalive())
+        native.status.assert_called_once_with()
+        self.assertEqual(self.controller.observe(),before)
+        self.assertEqual(self.engine.reset_count,1)
+        self.assertFalse(self.controller.playing)
+
+    def test_keepalive_skips_legacy_playing_and_disconnected_clients(self):
+        self.assertFalse(self.controller.keepalive())
+        native=SimpleNamespace(connection=None,status=Mock())
+        self.engine.native=native
+        self.assertFalse(self.controller.keepalive())
+        native.connection=object();self.controller.playing=True
+        self.assertFalse(self.controller.keepalive())
+        native.status.assert_not_called()
+
+    def test_keepalive_never_competes_with_an_active_battle_operation(self):
+        native=SimpleNamespace(connection=object(),status=Mock())
+        self.engine.native=native
+        held=threading.Event();release=threading.Event()
+        def hold():
+            with self.controller.lock:
+                held.set();release.wait(2)
+        worker=threading.Thread(target=hold);worker.start()
+        try:
+            self.assertTrue(held.wait(1))
+            self.assertFalse(self.controller.keepalive())
+            native.status.assert_not_called()
+        finally:
+            release.set();worker.join(2)
+
+    def test_keepalive_failure_requires_explicit_recovery_without_replaying_writes(self):
+        native=SimpleNamespace(connection=object(),status=Mock(side_effect=ConnectionAbortedError(10053,'Disconnected')))
+        self.engine.native=native
+        with self.assertRaises(ConnectionAbortedError):self.controller.keepalive()
+        self.assertIsNone(self.engine.state)
+        self.assertIn('10053',self.controller.last_error)
+        self.assertEqual(self.engine.reset_count,1)
+
     def setUp(self):
         self.engine = FakeEngine()
         self.controller = BattleController(engine_factory=lambda: self.engine)
         self.controller.engine = self.engine
         self.controller.reset(41)
+
+    def test_edge_playback_executes_only_its_actions_and_stops_at_the_verified_endpoint(self):
+        before=self.controller.observe()
+        action={'kind':'play-card','tick':95,'sequence':0,'owner':1,'slot':0,
+                'nativeCardId':26000000,'nativeX':3500,'nativeY':18000}
+        expected=observation(self.engine._state(100,()))['digest']
+        self.engine.resume=Mock(side_effect=AssertionError('bounded playback must not run freely'))
+        self.controller.start_playback([action],100,90,before['digest'],expected)
+        anchor=self.controller.playback_segment['anchorTime']
+        self.controller.advance_playback(anchor+10)
+        self.assertEqual(self.engine.state.tick,98)
+        self.controller.advance_playback(anchor+10)
+        self.assertEqual(self.engine.state.tick,100)
+        self.assertFalse(self.controller.playing)
+        self.assertTrue(self.controller.status()['playback']['completed'])
+        self.assertFalse(self.controller.advance_playback(anchor+100))
+        self.assertEqual(self.engine.next_sequence,1)
+        self.assertEqual(self.engine.reset_count,1)
+
+    def test_edge_pause_and_speed_changes_reanchor_without_skipping_or_restarting(self):
+        before=self.controller.observe();expected=observation(self.engine._state(120,()))['digest']
+        self.controller.start_playback([],120,90,before['digest'],expected)
+        anchor=self.controller.playback_segment['anchorTime']
+        self.controller.advance_playback(anchor+.2)
+        tick=self.engine.state.tick
+        self.controller.pause()
+        self.assertFalse(self.controller.advance_playback(anchor+100))
+        self.assertEqual(self.engine.state.tick,tick)
+        self.controller.resume(segment=True)
+        self.controller.speed(4)
+        self.assertTrue(self.controller.playing)
+        self.assertIsNotNone(self.controller.playback_segment)
+        self.assertEqual(self.controller.playback_segment['anchorTick'],tick)
+        self.assertEqual(self.engine.reset_count,1)
+
+    def test_edge_rejects_stale_base_and_out_of_range_actions_before_starting(self):
+        before=self.controller.observe()
+        for tick,digest,actions in [(91,before['digest'],[]),(90,'wrong',[]),
+                (90,before['digest'],[{'kind':'play-card','tick':101,'sequence':0}])]:
+            with self.assertRaises(ValueError):self.controller.start_playback(actions,100,tick,digest,'end')
+        self.assertIsNone(self.controller.playback_segment)
+        self.assertEqual(self.engine.state.tick,90)
+
+    def test_edge_fault_or_digest_mismatch_stops_and_cannot_retry_automatically(self):
+        before=self.controller.observe()
+        self.controller.start_playback([],91,90,before['digest'],'wrong-end')
+        with self.assertRaisesRegex(RuntimeError,'摘要'):self.controller.advance_playback(self.controller.playback_segment['anchorTime']+1)
+        self.assertFalse(self.controller.playing)
+        self.assertIsNone(self.controller.playback_segment)
+        self.assertFalse(self.controller.advance_playback())
+        self.assertIn('摘要',self.controller.last_error)
+
+    def test_zero_duration_edge_finishes_paused_and_reset_discards_its_schedule(self):
+        before=self.controller.observe()
+        self.controller.start_playback([],90,90,before['digest'],before['digest'])
+        self.assertFalse(self.controller.playing)
+        self.assertTrue(self.controller.playback_segment['completed'])
+        self.controller.reset(41)
+        self.assertIsNone(self.controller.playback_segment)
+
+    def test_long_replay_accelerates_all_steps_and_restores_the_chosen_speed(self):
+        self.controller.speed(0.5)
+        self.engine.speed_changes.clear()
+        state = self.controller.replay(41, [], 150)
+        self.assertEqual(state['tick'], 150)
+        self.assertEqual(self.engine.step_speeds, [4])
+        self.assertEqual(self.engine.speed_changes, [0.5, 4, 0.5])
+        self.assertEqual(self.controller.playback_speed, 0.5)
+        self.assertEqual(self.engine.playback_speed, 0.5)
+        self.assertFalse(self.controller.playing)
+        self.assertEqual(self.engine.configured_warmup_speed, 4)
+
+    def test_playing_speed_change_freezes_the_live_tick_before_setting_and_resuming(self):
+        running = {'value':True}
+        calls = []
+        def pause():
+            calls.append('pause');running['value']=False
+            self.engine.state=self.engine._state(97,())
+            return self.engine.state
+        def speed(value):
+            calls.append(('speed',value))
+            if running['value']:raise RuntimeError('stale_battle_state')
+            return {'ok':True}
+        def resume():
+            calls.append('resume');running['value']=True
+            return {'ok':True}
+        self.engine.pause=pause;self.engine.set_speed=speed;self.engine.resume=resume
+        self.controller.playing=True
+        self.assertEqual(self.controller.speed(2),{'speed':2})
+        self.assertEqual(calls,['pause',('speed',2),'resume'])
+        self.assertTrue(self.controller.playing)
+        self.assertEqual(self.controller.playback_speed,2)
+        self.assertEqual(self.engine.state.tick,97)
+        self.assertEqual(self.engine.reset_count,1)
+        self.assertEqual(self.engine.next_sequence,0)
+
+    def test_paused_speed_change_keeps_the_same_state_without_resuming(self):
+        before=self.controller.observe()
+        self.engine.pause=Mock(side_effect=AssertionError('already paused'))
+        self.engine.resume=Mock(side_effect=AssertionError('must stay paused'))
+        self.assertEqual(self.controller.speed(.25),{'speed':.25})
+        self.assertEqual(self.controller.observe(),before)
+        self.assertFalse(self.controller.playing)
+
+    def test_playing_speed_failure_stays_paused_and_never_retries_the_write(self):
+        self.controller.playing=True
+        self.engine.pause=Mock(return_value=self.engine.state)
+        self.engine.set_speed=Mock(return_value={'ok':False,'error':'clock unavailable'})
+        self.engine.resume=Mock()
+        with self.assertRaisesRegex(RuntimeError,'clock unavailable'):self.controller.speed(4)
+        self.engine.pause.assert_called_once()
+        self.engine.set_speed.assert_called_once_with(4)
+        self.engine.resume.assert_not_called()
+        self.assertFalse(self.controller.playing)
+        self.assertEqual(self.controller.playback_speed,1)
+
+    def test_invalid_speed_is_rejected_before_touching_playback(self):
+        self.controller.playing=True
+        self.engine.pause=Mock();self.engine.set_speed=Mock();self.engine.resume=Mock()
+        with self.assertRaises(ValueError):self.controller.speed(3)
+        self.engine.pause.assert_not_called();self.engine.set_speed.assert_not_called();self.engine.resume.assert_not_called()
+
+    def test_exact_snapshot_and_short_suffix_do_not_change_speed(self):
+        root = self.controller.observe()
+        snapshot = self.controller.snapshot_create()
+        for tick in (90, 109):
+            self.controller.replay(41, [], tick, snapshot_handle=snapshot['handle'], base_tick=90, base_digest=root['digest'])
+        self.assertEqual(self.engine.speed_changes, [])
+
+    def test_replay_caches_verified_ancestors_including_card_boundaries(self):
+        actions = [{'tick': 91, 'sequence': owner, 'owner': owner, 'kind': 'play-card',
+                    'nativeCardId': 26000000, 'slot': 0, 'nativeX': 4500, 'nativeY': 18000}
+                   for owner in (0, 1)]
+        checkpoints = []
+        for tick in (90, 91, 120):
+            state = self.controller.replay(41, [a for a in actions if a['tick'] <= tick], tick)
+            checkpoints.append({'nodeId': f'node-{tick}', 'tick': tick, 'digest': state['digest']})
+        expected = self.controller.replay(41, actions, 150)
+        self.engine.step_speeds.clear()
+        self.engine.speed_changes.clear()
+        result = self.controller.replay(41, actions, 150, expected['digest'], checkpoints=checkpoints)
+        self.assertEqual(result['digest'], expected['digest'])
+        self.assertEqual(len(result['snapshots']), 3)
+        self.assertEqual(self.engine.speed_changes, [4, 1])
+        self.assertTrue(all(speed == 4 for speed in self.engine.step_speeds))
+        resets = self.engine.reset_count
+        for expected, snapshot in zip(checkpoints, result['snapshots']):
+            state = self.controller.replay(41, [], expected['tick'], expected['digest'],
+                                           snapshot['handle'], snapshot['tick'], snapshot['digest'])
+            self.assertEqual(state['digest'], expected['digest'])
+            self.assertEqual(snapshot['nodeId'], expected['nodeId'])
+        self.assertEqual(self.engine.reset_count, resets)
+
+    def test_replay_cleans_up_ancestors_on_digest_or_clock_failure(self):
+        root = self.controller.observe()
+        checkpoint = {'nodeId': 'root', 'tick': 90, 'digest': root['digest']}
+        for failure in ('checkpoint-digest', 'final-digest', 'speed-restore'):
+            with self.subTest(failure=failure):
+                checkpoints = [checkpoint]
+                digest = None
+                if failure == 'checkpoint-digest':
+                    checkpoints = [checkpoint, {'nodeId': 'bad', 'tick': 100, 'digest': 'wrong'}]
+                elif failure == 'final-digest':
+                    digest = 'wrong'
+                else:
+                    self.engine.set_speed = lambda speed: {'ok': speed != 1, 'error': 'clock unavailable'}
+                with self.assertRaises(RuntimeError):
+                    self.controller.replay(41, [], 150, digest, checkpoints=checkpoints)
+                self.assertEqual(self.engine.snapshots, {})
+
+    def test_replay_snapshot_allocation_failure_keeps_confirmed_state(self):
+        root = self.controller.observe()
+        request = self.engine.request
+        self.engine.request = lambda command: ({'ok': False, 'error': 'snapshot store full'}
+                                               if command == 'snapshot-create' else request(command))
+        result = self.controller.replay(41, [], 150, checkpoints=[
+            {'nodeId': 'root', 'tick': 90, 'digest': root['digest']}])
+        self.assertEqual(result['tick'], 150)
+        self.assertEqual(result['snapshots'], [])
+        self.assertEqual(self.engine.playback_speed, 1)
+
+    def test_invalid_replay_checkpoints_do_not_reset_the_battle(self):
+        checkpoint = {'nodeId': 'root', 'tick': 90, 'digest': 'digest'}
+        invalid = [{}, [None], [checkpoint] * 33, [checkpoint, checkpoint],
+                   [{**checkpoint, 'tick': True}], [{**checkpoint, 'tick': 151}],
+                   [{**checkpoint, 'digest': ''}], [{**checkpoint, 'nodeId': 1}],
+                   [{**checkpoint, 'tick': 100}, {**checkpoint, 'nodeId': 'later'}]]
+        resets = self.engine.reset_count
+        for checkpoints in invalid:
+            with self.subTest(checkpoints=checkpoints), self.assertRaisesRegex(ValueError, '缓存节点'):
+                self.controller.replay(41, [], 150, checkpoints=checkpoints)
+        self.assertEqual(self.engine.reset_count, resets)
+
+    def test_speed_restore_failure_cannot_publish_a_replay_result(self):
+        def reject_restore(multiplier):
+            return {'ok': multiplier != 1, 'error': 'restore rejected'}
+        self.engine.set_speed = reject_restore
+        with self.assertRaisesRegex(RuntimeError, 'restore rejected'):
+            self.controller.replay(41, [], 150)
+
+    def test_replay_restores_speed_on_bad_action_or_digest(self):
+        self.controller.speed(0.25)
+        invalid = {'tick': 120, 'sequence': 0, 'owner': 1, 'kind': 'play-card',
+                   'nativeCardId': 1, 'slot': 0, 'nativeX': 4500, 'nativeY': 26000}
+        for actions, digest in (([invalid], None), ([], 'wrong')):
+            with self.subTest(actions=actions):
+                self.engine.speed_changes.clear()
+                with self.assertRaises(RuntimeError):
+                    self.controller.replay(41, actions, 150, digest)
+                self.assertEqual(self.engine.speed_changes[-2:], [4, 0.25])
+                self.assertEqual(self.engine.playback_speed, 0.25)
+
+    def test_failed_native_speed_change_does_not_advance_the_route(self):
+        self.engine.set_speed = lambda _: {'ok': False, 'error': 'clock unavailable'}
+        with self.assertRaisesRegex(RuntimeError, 'clock unavailable'):
+            self.controller.replay(41, [], 150)
+        self.assertEqual(self.engine.state.tick, 90)
+        self.assertEqual(self.engine.step_speeds, [])
+
+    def test_replay_speed_baseline_retains_normal_timing(self):
+        baseline = BattleController(engine_factory=lambda: self.engine, replay_speed=1)
+        baseline.engine = self.engine
+        baseline.replay(41, [], 150)
+        self.assertEqual(self.engine.step_speeds, [1])
+        self.assertEqual(self.engine.speed_changes, [])
 
     def test_paused_play_uses_the_confirmed_tick_and_advances_only_once(self):
         receipt=self.controller.play_card(1,0,4500,24000,expected_tick=90)
@@ -240,6 +520,21 @@ class ControllerTest(unittest.TestCase):
         restored = self.controller.snapshot_restore(snapshot["handle"])
         self.assertEqual(restored["tick"], 90)
 
+    def test_close_releases_session_snapshots_before_saving_a_warm_game(self):
+        first = self.controller.snapshot_create()['handle']
+        second = self.controller.snapshot_create()['handle']
+        released = []
+        original = self.engine.request
+        def request(command):
+            if command.startswith('release-snapshot '):
+                released.append(int(command.split()[1]))
+            return original(command)
+        self.engine.request = request
+        self.controller.snapshot_release(first)
+        self.controller.close()
+        self.assertCountEqual(released, [first, second])
+        self.assertEqual(self.controller._snapshot_handles, set())
+
     def test_custom_decks_are_restored_on_cold_replay_and_scope_snapshots(self):
         from bridge.match_config import STANDARD_DECK
         custom = list(STANDARD_DECK)
@@ -333,6 +628,33 @@ class NativeCaptureContractTest(unittest.TestCase):
     def test_native_error_is_preserved(self):
         with self.assertRaisesRegex(RuntimeError, "manager-or-generation"):
             self.decode({"ok": False, "error": "manager-or-generation"})
+
+    def test_rendered_warmup_advances_exactly_to_90_and_restores_the_clock(self):
+        from native_engine.engine import RenderedEngine
+        for fail in (False, True):
+            with self.subTest(failed_advance=fail):
+                engine = RenderedEngine()
+                commands = []
+                def request(command):
+                    commands.append(command)
+                    if command == 'status':
+                        return {'mode': 'native-render', 'nativeRenderReady': True, 'nativeRenderLoaded': 1}
+                    if command.startswith('configure-native '):
+                        return {'ok': True, 'sequence': 1}
+                    if command == 'pause':
+                        return {'ok': True, 'tick': 5}
+                    if command == 'advance-native 85' and fail:
+                        return {'ok': False, 'error': 'warmup failed'}
+                    return {'ok': True}
+                engine.request = request
+                engine._capture = lambda: SimpleNamespace(tick=90)
+                if fail:
+                    with self.assertRaisesRegex(RuntimeError, 'warmup failed'):
+                        engine.reset(warmup_speed=4)
+                    self.assertIsNone(engine.state)
+                else:
+                    self.assertEqual(engine.reset(warmup_speed=4).tick, 90)
+                self.assertEqual(commands[-3:], ['speed 4', 'advance-native 85', 'speed 1'])
 
     def test_current_tower_record_decodes(self):
         state = self.decode({"ok": True, "schema": "cr-minimal.v3", "generation": 1, "tick": 90,

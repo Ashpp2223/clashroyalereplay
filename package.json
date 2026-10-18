@@ -1,6 +1,6 @@
 {
   "name": "clash-replay-tree",
-  "version": "0.3.10",
+  "version": "0.4.1",
   "private": true,
   "type": "module",
   "scripts": {

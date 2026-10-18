@@ -53,10 +53,11 @@ def clear_offline_rules(upstream, adb: str, serial: str) -> None:
             cleanup_command(adb, serial, "shell", table, "-D", "OUTPUT", number)
 
 
-def shutdown(adb: str, serial: str, port: int = DEVICE_PORT) -> None:
+def shutdown(adb: str, serial: str, port: int = DEVICE_PORT, *, preserve_game: bool = False) -> None:
     upstream = upstream_bootstrap()
-    cleanup_command(adb, serial, "shell", "am", "force-stop", upstream.PACKAGE)
-    clear_offline_rules(upstream, adb, serial)
+    if not preserve_game:
+        cleanup_command(adb, serial, "shell", "am", "force-stop", upstream.PACKAGE)
+        clear_offline_rules(upstream, adb, serial)
     result = cleanup_command(adb, serial, "forward", "--list")
     forwards = result.stdout.splitlines() if result is not None else []
     if f"{serial} tcp:{port} tcp:{DEVICE_PORT}" in forwards:
@@ -86,7 +87,8 @@ def wait_until_ready(upstream, adb: str, serial: str, port: int, timeout: float)
     raise RuntimeError("原生引擎未在规定时间内完成内容加载，尚不能开始复盘")
 
 
-def bootstrap(adb: str, serial: str, port: int = DEVICE_PORT, timeout: float = 90, *, verified: bool = False) -> dict:
+def bootstrap(adb: str, serial: str, port: int = DEVICE_PORT, timeout: float = 90, *, verified: bool = False,
+              resume: bool = False) -> dict:
     upstream = upstream_bootstrap()
     # AndroidRuntime has just verified root, ABI, APK, libraries and content.
     # Standalone CLI callers still perform their own environment checks.
@@ -106,12 +108,24 @@ def bootstrap(adb: str, serial: str, port: int = DEVICE_PORT, timeout: float = 9
            line != f"{serial} tcp:{port} tcp:{DEVICE_PORT}" for line in forwards):
         raise RuntimeError("战斗接口端口已被其他设备占用")
     try:
-        upstream.shell(adb, serial, "am", "force-stop", upstream.PACKAGE)
+        if not resume:
+            upstream.shell(adb, serial, "am", "force-stop", upstream.PACKAGE)
         clear_offline_rules(upstream, adb, serial)
         for table in ("iptables", "ip6tables"):
             upstream.shell(adb, serial, table, "-I", "OUTPUT", "!", "-o", "lo", "-m", "owner",
                            "--uid-owner", uid, "-m", "comment", "--comment", RULE_COMMENT, "-j", "REJECT")
         upstream.command(adb, serial, "forward", f"tcp:{port}", f"tcp:{DEVICE_PORT}")
+        if resume:
+            # A saved emulator can contain the already initialized, paused game.
+            # Probe it once with its one-second timeout; broken/absent snapshots
+            # fall back to the regular fresh game startup below.
+            try:
+                status = upstream.read_status(port)
+                if status.get('contentReady') and (not status.get('nativeRenderReady') or status.get('paused')):
+                    return {**status, 'resumed': True}
+            except (ConnectionError, OSError, ValueError, RuntimeError):
+                pass
+            upstream.shell(adb, serial, "am", "force-stop", upstream.PACKAGE)
         upstream.shell(adb, serial, "am", "start", "-n", upstream.ACTIVITY)
         return wait_until_ready(upstream, adb, serial, port, timeout)
     except Exception:

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile,readdir,writeFile,mkdir} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {openDesktopHarness} from './desktop_control.mjs';
+import {STANDARD_NATIVE_DECK} from '../src/domain/nativeReplay.ts';
 
 const app=resolve(process.argv[2]??'src-tauri/target/release/clash-replay-tree.exe');
 const runtime=resolve(process.argv[3]??`${process.env.LOCALAPPDATA}/cr-replay-clean-test`);
@@ -30,16 +31,34 @@ try {
   await screenshot('01-before-creation');
   assert.equal((await readdir(join(home,'saves')).catch(()=>[])).filter(name=>name.endsWith('.cr-native-replay.json')).length,existingCount);
   report.checks.push('startup-does-not-create-an-archive');
+  let connectionStarts=0;
+  page.on('request',request=>{if(new URL(request.url()).pathname==='/v1/start')connectionStarts++;});
+  const preparationStarted=performance.now();
+  const prepared=page.waitForResponse(async response=>response.url().endsWith('/v1/status')&&response.ok()&&(await response.json()).ready,{timeout:180000});
+  void prepared.catch(()=>{});
   await page.getByRole('button',{name:'新建存档',exact:true}).first().click();
   let dialog=page.getByRole('dialog');
   await dialog.getByRole('textbox',{name:'新存档名称'}).fill(title);
+  for(const side of ['敌方','我方']){
+   await dialog.getByRole('button',{name:`${side} · 0/8`,exact:true}).click();
+   for(const id of STANDARD_NATIVE_DECK)await dialog.locator(`.card-catalog button[data-card-id="${id}"]`).click();
+  }
   await dialog.getByLabel('我方骑士形态').selectOption('2');
-  await dialog.getByRole('button',{name:'将骑士后移',exact:true}).click();
+  await dialog.locator('.selected-deck-card[data-card-id="26000000"] .initial-card').press('ArrowRight');
+  assert(await dialog.getByRole('textbox',{name:'新存档名称'}).isEditable());
+  await prepared;
+  report.connection={preparationWhileConfiguringMs:Math.round(performance.now()-preparationStarted)};
+  assert.equal(connectionStarts,1);
+  assert.equal((await readdir(join(home,'saves')).catch(()=>[])).filter(name=>name.endsWith('.cr-native-replay.json')).length,existingCount);
   await screenshot('02-initial-configuration');
+  const creationStarted=performance.now();
   await dialog.getByRole('button',{name:'创建存档并开始',exact:true}).click();
   await dialog.waitFor({state:'hidden',timeout:90000});
   await page.locator('.native-surface').waitFor({timeout:180000});
   await page.waitForFunction(()=>!document.querySelector('.playback-controls button:nth-child(3)').disabled);
+  report.connection.confirmationToBattleMs=Math.round(performance.now()-creationStarted);
+  assert.equal(connectionStarts,1);
+  report.checks.push('new-match-configuration-prepares-one-connection-without-saving-and-creation-reuses-it');
   let saved=await project();assert(saved);
   assert.equal(saved.data.match.level,16);assert.equal(saved.data.match.dealMode,'ordered');
   const initial=structuredClone(saved.data.match);
@@ -52,7 +71,8 @@ try {
   report.checks.push('configured-eight-card-orders-match-live-native-deal');
   await screenshot('03-native-battle');
   await page.getByRole('button',{name:'初始配置（只读）',exact:true}).click();
-  dialog=page.getByRole('dialog');assert.equal(await dialog.locator('select,input').count(),0);
+  dialog=page.getByRole('dialog');assert.equal(await dialog.locator('select:enabled,input:enabled').count(),0);
+  assert.equal(await dialog.locator('.tower-config select:disabled').count(),2);
   assert.equal(await dialog.getByRole('button',{name:/移除|前移|后移|创建/}).count(),0);
   await screenshot('04-locked-configuration');
   await dialog.getByRole('button',{name:'关闭',exact:true}).click();
@@ -78,6 +98,17 @@ try {
   assert.deepEqual(saved.data.match,initial);
   await screenshot('05-editable-child-saved');
   report.checks.push('copy-play-save-updates-one-child-without-changing-initial-configuration');
+  // Reopen beyond a recorded intermediate node, then visit that ancestor for
+  // the first time. It must already have a native snapshot from the open replay.
+  await page.getByRole('button',{name:'＋ 从当前节点创建子节点',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('.playback-controls button:nth-child(3)').disabled);
+  await page.getByRole('button',{name:'前进一步 │▶',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('.playback-controls button:nth-child(3)').disabled);
+  await page.getByRole('button',{name:'保存当前节点',exact:true}).click();
+  await page.locator('.native-notice').filter({hasText:'已更新当前节点'}).waitFor();
+  saved=await project();
+  const grandchild=Object.values(saved.data.nodes).find(node=>node.parentId===child.id);
+  assert(grandchild);assert.equal(grandchild.finalTick,child.finalTick+1);
   const waitFrame=()=>page.waitForFunction(()=>{
     const surface=document.querySelector('.native-surface'),canvas=document.querySelector('[aria-label="原生竞技场"]');
     return surface&&canvas&&canvas.dataset.frameRevision===surface.dataset.controlRevision&&!document.querySelectorAll('.playback-controls button')[2].disabled;
@@ -120,38 +151,70 @@ try {
   await harness.close();harness=null;
   harness=await openDesktopHarness({app,home,runtime,devUrl});page=harness.page;
   await page.locator('.native-home').waitFor();
+  const reopenStarted=performance.now();
+  const coldReplay=page.waitForResponse(response=>response.url().endsWith('/v1/replay')&&response.ok()&&response.request().postDataJSON().targetTick===grandchild.finalTick,{timeout:180000});
+  // Keep a slow cold-start response handled while waiting for the workspace.
+  void coldReplay.catch(()=>{});
   await page.getByRole('button',{name:'继续上次复盘',exact:true}).click();
   await page.locator('.native-notice').filter({hasText:'项目已载入'}).waitFor({timeout:180000});
-  assert.equal(await page.locator('.tree-node').count(),2);
-  assert((await page.locator('.tree-node.active').innerText()).includes('1 动作'));
+  assert.equal(await page.locator('.tree-node').count(),3);
+  assert.equal(await page.locator('.tree-node.active').getAttribute('data-node-id'),grandchild.id);
+  const ancestorCache=(await (await coldReplay).json()).snapshots;
+  assert(ancestorCache.some(snapshot=>snapshot.nodeId===child.id&&snapshot.tick===child.finalTick&&snapshot.digest===child.stateDigest));
+  await waitFrame();
+  report.connection.reopenToBattleMs=Math.round(performance.now()-reopenStarted);
   await screenshot('06-cold-reopen');
-  report.checks.push('cold-reopen-restores-selected-child-and-locked-match');
+  report.checks.push('cold-reopen-restores-selected-grandchild-and-locked-match');
   // Crossing a recorded card event must replay it, not create an empty future.
   await waitFrame();
   // Root restoration must keep its snapshot after reopening a saved child.
   let freshFrames=0;
-  const countFrame=request=>{if(request.url().endsWith('/v1/frame?fresh=1'))freshFrames++;};
+  const captures=[];
+  const countFrame=request=>{if(request.url().endsWith('/v1/frame?fresh=1')){freshFrames++;captures.push(request);}};
   page.on('request',countFrame);
   const root=saved.data.nodes[saved.data.rootNodeId];
   async function switchNode(node) {
-    const started=performance.now(),before=freshFrames;
+    const started=performance.now(),before=freshFrames,capturesBefore=captures.length;
     const response=page.waitForResponse(response=>response.url().endsWith('/v1/replay')&&response.ok());
     await page.locator(`[data-node-id="${node.id}"] button`).evaluate(button=>button.click());
     const confirmed=await response,state=await confirmed.json();
     assert.equal(state.tick,node.finalTick);assert.equal(state.digest,node.stateDigest);
     await waitFrame();
     return {nodeId:node.id,displayMs:Math.round(performance.now()-started),freshFrames:freshFrames-before,
+      captures:captures.slice(capturesBefore).map(request=>{const timing=request.timing();return {
+        captureAndHeadersMs:Math.round(timing.responseStart-timing.requestStart),
+        transferMs:Math.round(timing.responseEnd-timing.responseStart)};}),
       source:await page.getByLabel('原生竞技场').getAttribute('data-frame-source'),command:confirmed.request().postDataJSON()};
   }
   const firstRoot=await switchNode(root);
   assert(firstRoot.command.snapshotHandle>0);assert.equal(firstRoot.command.baseTick,root.finalTick);
-  await switchNode(child);
-  report.nodeSwitch={firstRootDisplayMs:firstRoot.displayMs,warm:[]};
+  const firstAncestor=await switchNode(child);
+  assert(firstAncestor.command.snapshotHandle>0);assert.equal(firstAncestor.command.baseTick,child.finalTick);
+  assert.deepEqual(firstAncestor.command.actions,[]);
+  report.nodeSwitch={firstRootDisplayMs:firstRoot.displayMs,firstRootCaptures:firstRoot.captures,
+    firstAncestorDisplayMs:firstAncestor.displayMs,firstAncestorCaptures:firstAncestor.captures,warm:[]};
+  report.checks.push('cold-open-caches-unvisited-intermediate-node-and-first-visit-restores-without-actions');
   for(const node of [root,child,root,child,root,child]) {
     const sample=await switchNode(node);
     assert.equal(sample.freshFrames,0);assert.equal(sample.source,'cache');
     report.nodeSwitch.warm.push({nodeId:sample.nodeId,displayMs:sample.displayMs});
   }
+  await page.getByRole('button',{name:'返回首页',exact:true}).click();
+  await page.locator('.native-home').waitFor();
+  const homeReplays=[];
+  const recordReplay=request=>{if(request.url().endsWith('/v1/replay'))homeReplays.push(request.postDataJSON());};
+  page.on('request',recordReplay);
+  const framesBeforeHome=freshFrames,homeStarted=performance.now();
+  await page.getByRole('button',{name:'继续上次复盘',exact:true}).click();
+  await page.locator('.native-notice').filter({hasText:'项目已载入'}).waitFor({timeout:180000});
+  await waitFrame();
+  report.nodeSwitch.homeReopenMs=Math.round(performance.now()-homeStarted);
+  page.off('request',recordReplay);
+  assert.equal(homeReplays.length,1);assert(homeReplays[0].snapshotHandle>0);
+  assert.equal(homeReplays[0].targetTick,child.finalTick);
+  assert.equal(freshFrames,framesBeforeHome);
+  assert.equal(await page.locator('.tree-node.active').getAttribute('data-node-id'),child.id);
+  report.checks.push('home-reopen-preserves-the-selected-node-with-one-snapshot-restore-and-no-new-screenshot');
   page.off('request',countFrame);
   report.checks.push('reopened-root-keeps-snapshot-and-warm-node-switches-use-validated-frames');
   await page.getByRole('button',{name:'◀│ 后退一步',exact:true}).click();

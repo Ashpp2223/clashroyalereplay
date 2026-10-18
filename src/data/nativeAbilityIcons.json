@@ -1,0 +1,152 @@
+{
+  "abilities": {
+    "ArcherQueenRapid": {
+      "image": "/abilities/icon_ability_archer_queen.png",
+      "cost": 1
+    },
+    "BalloonHero_Ability": {
+      "image": "/abilities/ability_icon_balloon.png",
+      "cost": 2
+    },
+    "BarbLogHeroAbility": {
+      "image": "/abilities/ability_icon_barbarian_barrel.png",
+      "cost": 1
+    },
+    "BerserkerHeroAbility": {
+      "image": "/abilities/ability_icon_berserker.png",
+      "cost": 3
+    },
+    "BossBandit_ability": {
+      "image": "/abilities/icon_ability_boss_bandit.png",
+      "cost": 1
+    },
+    "BowlerHeroAbility": {
+      "image": "/abilities/ability_icon_bowler.png",
+      "cost": 2
+    },
+    "ChampGuardianAbility": {
+      "image": "/abilities/icon_ability_little_prince.png",
+      "cost": 3
+    },
+    "DarkPrinceHero_Ability": {
+      "image": "/abilities/ability_icon_dark_prince.png",
+      "cost": 3
+    },
+    "Deflect": {
+      "image": "/abilities/icon_ability_monk.png",
+      "cost": 1
+    },
+    "ElectroWizardHero_Ability": {
+      "image": "/abilities/ability_icon_electrowizard.png",
+      "cost": 2
+    },
+    "EliteArcherHero_Ability": {
+      "image": "/abilities/ability_icon_magic_archer.png",
+      "cost": 2
+    },
+    "GiantHero_Ability": {
+      "image": "/abilities/ability_icon_giant.png",
+      "cost": 2
+    },
+    "GoblinHero_Ability": {
+      "image": "/abilities/ability_icon_goblins.png",
+      "cost": 1
+    },
+    "GoldenKnightChain": {
+      "image": "/abilities/icon_ability_golden_knight.png",
+      "cost": 1
+    },
+    "IceGolemiteHero_Ability": {
+      "image": "/abilities/ability_icon_ice_golem.png",
+      "cost": 2
+    },
+    "IceWizardHero_ability": {
+      "image": "/abilities/ability_icon_ice_wizard.png",
+      "cost": 2
+    },
+    "Knight_hero_Ability": {
+      "image": "/abilities/ability_icon_knight.png",
+      "cost": 2
+    },
+    "MegaMinion_Teleport_Ability": {
+      "image": "/abilities/ability_icon_mega_minion.png",
+      "cost": 2
+    },
+    "MightyMinerLaneSwitch": {
+      "image": "/abilities/icon_ability_mighty_miner.png",
+      "cost": 1
+    },
+    "MiniPekkHeroAbility": {
+      "image": "/abilities/ability_icon_mini_pekka.png",
+      "cost": 1
+    },
+    "Musketeer_hero_Ability": {
+      "image": "/abilities/ability_icon_musketeer.png",
+      "cost": 3
+    },
+    "SkeletonKing": {
+      "image": "/abilities/icon_ability_skeleton_king.png",
+      "cost": 2
+    },
+    "Tombstone_hero_Ability": {
+      "image": "/abilities/ability_icon_tombstone.png",
+      "cost": 5
+    },
+    "ValkyrieHero_Ability": {
+      "image": "/abilities/ability_icon_valkyrie.png",
+      "cost": 3
+    },
+    "WizardHeroAbility": {
+      "image": "/abilities/ability_icon_wizard.png",
+      "cost": 1
+    },
+    "goblinstein_ability": {
+      "image": "/abilities/icon_ability_goblinstein.png",
+      "cost": 2
+    }
+  },
+  "source": {
+    "decoder": "https://github.com/obus-globus/sc5-parser/tree/9108080256a0df6cd772d81afdbc26047d79d78d",
+    "assetsSha256": {
+      "sc/ui_spells.sc": "bb2060e53b56d0332f48b157384a497343550b0ab817c08db0c28c9abafc46d6",
+      "sc/ui_spells_0.sctx": "5cbcd30a0e3b290875694672102b3e28d665c3662f3bcdd340e1dc348efc8f25",
+      "sc/ui_spells_1.sctx": "1de3267f178866a5ea131818c2fc926eef2c1f90f12246ce42c0ab8c6cf5c422",
+      "sc/ability_icon_balloon.sc": "4173d30adae9ca90581c6377a94cb1d3c94cea94ca58aa7ff3b0120f5ce3f637",
+      "sc/ability_icon_balloon_0.sctx": "e8af3a9413f6ced31083ab8725a5ccb709a261dee7d28eaf6efdaed76cc7f925",
+      "sc/ability_icon_barbarian_barrel.sc": "51ba31f06b675d97c6db7b66732a3360e07207c33a48829319fadd31259f4949",
+      "sc/ability_icon_barbarian_barrel_0.sctx": "f8b0635e70ae9eae66393a7f9fff27ad3755771eb27e5c3be4acfa4c46dd7a12",
+      "sc/ability_icon_berserker.sc": "dee0f04caf58e83f3449ce66f387eddcda818a95000b720dc35daea073d03f41",
+      "sc/ability_icon_berserker_0.sctx": "6d725dbc1a526ab379368318322ac69c6c07bd3ed578474e7c06400ee022780f",
+      "sc/ability_icon_bowler.sc": "9780b275d3a6a820e7799286a79c224dee36305e910c0e7fc08a6999d0fb10f8",
+      "sc/ability_icon_bowler_0.sctx": "337326248aa100ccfda9ce8ab062bdf38a22cf3e0ee8bdf86ac6919c68ad47a5",
+      "sc/ability_icon_dark_prince.sc": "cb11d11f86db915f23ad1f89832c995f32bf092c8a98b7797266416bf3d714c0",
+      "sc/ability_icon_dark_prince_0.sctx": "fe9e52825b2a6e82dc9568bc4d3749427de65348af4c4b6a73cc0031ea87011c",
+      "sc/ability_icon_electrowizard.sc": "fdf608feefa4506d828f37353d65981b25350a7a43e61216badfdc67b21df3e2",
+      "sc/ability_icon_electrowizard_0.sctx": "b079bb444e784d7aa3525d19d738bffcf2195dfb21ed2bc493340cef48bd41ea",
+      "sc/ability_icon_magic_archer.sc": "2b26c0f3aa08f7b4208498317364b4abc8421cc136d0bce794a12d89bf450f23",
+      "sc/ability_icon_magic_archer_0.sctx": "08c1d3ebec346abe1710ee8a3b88a2656cdf4d189fbe4cced536529a9d95bd5b",
+      "sc/ability_icon_giant.sc": "de540e08e554b764e95339369a9c3d7cdc4f0e2d1b20cbb3bf33a40cce56cab6",
+      "sc/ability_icon_giant_0.sctx": "f7640f83cd5be8014611203083f301c59a75aea8db8b8c0ed48b65e96449ffac",
+      "sc/ability_icon_goblins.sc": "ddcc3ae9d1d2566815bf3085c57c7147e2c52dea64cad5ac23a9162ba02092fe",
+      "sc/ability_icon_goblins_0.sctx": "2b686856ea54c4e39b96f7b60279535f95b27924d54654a657c30c113aeebd21",
+      "sc/ability_icon_ice_golem.sc": "c45b6ccb7494c90191ebe34f790ede3726ef0b2fae014b4a599d9d42599aef50",
+      "sc/ability_icon_ice_golem_0.sctx": "5544fc7c72985ec6540cbee1db9dcb663a640d4f575a50ebb8ab4f99c41cccf2",
+      "sc/ability_icon_ice_wizard.sc": "9fe27d3ae8af45e4eb9fb202f21c82fb7b8f4a6433c0a282fa223572f8695016",
+      "sc/ability_icon_ice_wizard_0.sctx": "6d6ff5371884d51546abbf01d01c271b73be59f4656423a4030eccca9b7220bc",
+      "sc/ability_icon_knight.sc": "f4bd0aa7a713838f23ba3f0e80770a4ab0dbcafa18bc01e4aa3fb930fb1f0123",
+      "sc/ability_icon_knight_0.sctx": "947f120fa13cf5ab6aa6e107877c501b6f88dbe32a30fc175f3d923dafda434b",
+      "sc/ability_icon_mega_minion.sc": "1548845e13205495c5358c32658f126d4fc384ae06a5b2945f0d6a4874154f07",
+      "sc/ability_icon_mega_minion_0.sctx": "191a5417fb76e942fad7439f6e4277476f95383740673f447a15a58ec7899eb8",
+      "sc/ability_icon_mini_pekka.sc": "798855279efacf8a0e34855b558087ad0dd3d8374b3cc5d34b84faa2ab7dc9ea",
+      "sc/ability_icon_mini_pekka_0.sctx": "1b9833e69a1989697c2761f8c007c48874c59898e924c45ab04a4948b338ce0b",
+      "sc/ability_icon_musketeer.sc": "78ded9bd6880ee9d76a1e67178559d6d237e57839991007c256439d0627eefc1",
+      "sc/ability_icon_musketeer_0.sctx": "8f3c3013374a7f6244ab96f04eb300522f47e7d82f0665b3d5ccdd583dd69e00",
+      "sc/ability_icon_tombstone.sc": "37e7d1f9acf39a9c7ecc2dce71184510cc4e70ac4b9e75f89743c6e47739d610",
+      "sc/ability_icon_tombstone_0.sctx": "1cff675af63fab9e46179657fd9349b7c3f95f7622efe2123059482390e0bb1d",
+      "sc/ability_icon_valkyrie.sc": "98b795232c8e25a72d9359d1d54780b23af7f97aab950828d8c7e4e0d85f1316",
+      "sc/ability_icon_valkyrie_0.sctx": "607b0c47a998b5fdfcfe5477f9a2ac6b19f672947172ef12487f8ed41543675e",
+      "sc/ability_icon_wizard.sc": "5729927d909ba418a315f1c3763d65196cdd900503d840e4eb7232904e39ed79",
+      "sc/ability_icon_wizard_0.sctx": "46b818105ba30560e9835f9a4e63023c61fb466d4f4a645c898c77139ab591ff"
+    }
+  }
+}

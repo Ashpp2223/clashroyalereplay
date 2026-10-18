@@ -1,4 +1,4 @@
-import type { NativeReplayProject, NativeTimelineNode, NativeWorkingBranch } from '../domain/nativeReplay.ts';
+import type { NativeReplayProject, NativeTimelineNode, NativeWorkingBranch, NativePlaybackRoute } from '../domain/nativeReplay.ts';
 
 type Position = { x: number; y: number };
 export type EditEntry =
@@ -6,7 +6,7 @@ export type EditEntry =
   | { kind: 'position'; nodeId: string; before: Position }
   | { kind: 'action'; nodeId: string; actionId: string }
   | { kind: 'structure'; nodes: Record<string, { before?: NativeTimelineNode; after?: NativeTimelineNode }>;
-      layout: Record<string, Position | undefined>; branch: NativeWorkingBranch; digest: string };
+      layout: Record<string, Position | undefined>; branch: NativeWorkingBranch; digest: string; replay?:NativePlaybackRoute };
 
 export class EditHistory {
   entries: EditEntry[] = [];
@@ -24,7 +24,7 @@ export class EditHistory {
 }
 
 export function structureEntry(before: NativeReplayProject, after: NativeReplayProject,
-  branch: NativeWorkingBranch, digest: string): EditEntry {
+  branch: NativeWorkingBranch, digest: string,replay?:NativePlaybackRoute): EditEntry {
   const nodes: Extract<EditEntry, {kind: 'structure'}>['nodes'] = {};
   const layout: Record<string, Position | undefined> = {};
   for (const id of new Set([...Object.keys(before.nodes), ...Object.keys(after.nodes)])) {
@@ -33,7 +33,7 @@ export function structureEntry(before: NativeReplayProject, after: NativeReplayP
       layout[id] = before.layout[id];
     }
   }
-  return { kind: 'structure', nodes, layout, branch, digest };
+  return { kind: 'structure', nodes, layout, branch, digest, replay };
 }
 
 export function undoStructure(project: NativeReplayProject, entry: Extract<EditEntry, {kind: 'structure'}>): NativeReplayProject {

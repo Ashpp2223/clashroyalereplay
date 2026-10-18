@@ -3,7 +3,10 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
+import zipfile
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from bridge import install_runtime as installer
@@ -60,6 +63,15 @@ class PendingDownloadsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "冲突"):
                 installer.recover_pending_downloads(self.device, self.hashes)
         self.assertFalse(any(op.startswith("cp ") for op in self.operations))
+
+    def test_already_published_identical_downloads_do_not_restart_the_game(self):
+        for name in self.contents:
+            self.hashes[name.removesuffix('.update')] = self.hashes[name]
+        with patch.object(installer, 'save_receipt') as receipt:
+            result = installer.recover_pending_downloads(self.device, self.hashes)
+        self.assertEqual(result, self.hashes)
+        self.assertEqual(self.operations, [])
+        receipt.assert_not_called()
 
 
 class FakeDevice:
@@ -250,6 +262,28 @@ class BootstrapPatchTest(unittest.TestCase):
 
 
 class ContentValidationTest(unittest.TestCase):
+    def test_verified_local_apk_fallbacks_keep_full_resource_hash_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            apk = Path(directory) / 'prepared.apk'
+            contents = {name: ('fixture:' + name).encode() for name in installer.CONTENT_LOCK['apkFallbackFiles']}
+            with zipfile.ZipFile(apk, 'w') as archive:
+                for name, data in contents.items():
+                    archive.writestr('assets/' + name, data)
+            hashes = dict(RESOURCES)
+            for name in contents:
+                del hashes[name]
+            device = Mock()
+            actual = installer.base_asset_hashes(device, hashes, apk)
+            self.assertEqual(actual, {name: hashlib.sha256(data).hexdigest() for name, data in contents.items()})
+            device.shell.assert_not_called()
+            # A local file is an alternate source of bytes, not permission to
+            # trust missing or changed contents merely because an APK was checked.
+            with self.assertRaisesRegex(ValueError, '缺失或不匹配'):
+                installer.validate_resources(hashes, actual)
+            supplied = next(iter(contents))
+            hashes[supplied] = 'already-verified'
+            self.assertNotIn(supplied, installer.base_asset_hashes(device, hashes, apk))
+
     def test_known_fingerprint_variant_requires_matching_apk_fallbacks(self):
         files = dict(RESOURCES)
         files["fingerprint.json"] = installer.CONTENT_LOCK["fingerprints"][1]
@@ -319,6 +353,118 @@ class StartupResourcesTest(unittest.TestCase):
                 hashes[name] = value
             with self.assertRaisesRegex(ValueError, '缺失或不匹配'):
                 installer.validate_resources(hashes)
+
+
+class RuntimeVerificationTest(unittest.TestCase):
+    def setUp(self):
+        from bridge.runtime import AndroidRuntime, MANIFEST, PROBE_SHA256
+        self.runtime = AndroidRuntime.__new__(AndroidRuntime)
+        self.runtime.apk_sha256 = NEW
+        self.calls = []
+        self.apk_started = threading.Event()
+        self.resources_started = threading.Event()
+        self.apk_hashes = [NEW]
+
+        def command(*args, **kwargs):
+            self.calls.append(args)
+            if args[1:3] == ('getprop', 'ro.product.cpu.abilist'):
+                return SimpleNamespace(stdout='x86_64,arm64-v8a')
+            if args[1:3] == ('pm', 'path'):
+                return SimpleNamespace(stdout='package:' + BASE)
+            if args[-1] == BASE:
+                self.apk_started.set()
+                if not self.resources_started.wait(2):
+                    raise AssertionError('Resource verification did not overlap APK hashing')
+                return SimpleNamespace(stdout=self.apk_hashes.pop(0) + '  ' + BASE)
+            return SimpleNamespace(stdout=(MANIFEST['libg_sha256'] if args[-1].endswith('libg.so') else PROBE_SHA256) + '  file')
+
+        def resources():
+            self.resources_started.set()
+            self.assertTrue(self.apk_started.wait(2))
+        self.runtime.command = command
+        self.runtime._check_updated_content = resources
+        self.runtime._install_local_prepared = Mock()
+
+    def test_startup_overlaps_checks_and_still_verifies_all_binaries(self):
+        self.runtime._check_installed_runtime()
+        self.runtime._install_local_prepared.assert_not_called()
+        for name in ('libg.so', 'libcrprobe.so', 'base.apk'):
+            self.assertTrue(any(call[-1].endswith(name) for call in self.calls))
+
+    def test_changed_apk_requires_install_and_new_binary_checks(self):
+        self.apk_hashes = [OLD, NEW]
+        self.runtime._check_installed_runtime()
+        self.runtime._install_local_prepared.assert_called_once()
+        self.assertEqual(sum(call[-1] == BASE for call in self.calls), 2)
+        self.assertEqual(sum(call[-1].endswith('libg.so') for call in self.calls), 2)
+
+    def test_resource_failure_cannot_trigger_install(self):
+        def invalid_resources():
+            self.resources_started.set()
+            raise ValueError('资源缺失')
+        self.runtime._check_updated_content = invalid_resources
+        with self.assertRaisesRegex(ValueError, '资源缺失'):
+            self.runtime._check_installed_runtime()
+        self.runtime._install_local_prepared.assert_not_called()
+
+    def test_unchanged_installed_apk_and_libraries_reuse_scan_but_check_resources(self):
+        stamp = {'serial': 'emulator-5560', 'path': BASE, 'stat': 'unchanged'}
+        self.runtime._apk_cache = {'installed': stamp}
+        self.runtime._installed_apk_stamp = Mock(return_value=stamp)
+        self.runtime._check_updated_content = Mock()
+        self.runtime._check_installed_runtime()
+        self.assertFalse(self.apk_started.is_set())
+        self.assertTrue(self.runtime.apk_cache_hit)
+        self.runtime._check_updated_content.assert_called_once()
+        self.assertFalse(any('sha256sum' in call for call in self.calls))
+
+    def test_changed_apk_metadata_requires_the_full_hash_again(self):
+        self.runtime._apk_cache = {'installed': {'stat': 'old'}}
+        stamp = {'serial': 'emulator-5560', 'path': BASE, 'stat': 'new'}
+        self.runtime._installed_apk_stamp = Mock(return_value=stamp)
+        self.runtime._check_installed_runtime()
+        self.assertTrue(self.apk_started.is_set())
+        self.assertFalse(self.runtime.apk_cache_hit)
+        self.assertEqual(self.runtime._apk_cache['installed'], stamp)
+
+    def test_apk_changing_during_verification_cannot_be_cached(self):
+        self.runtime._apk_cache = {}
+        self.runtime._installed_apk_stamp = Mock(side_effect=[{'stat': 'before'}, {'stat': 'after'}])
+        with self.assertRaisesRegex(RuntimeError, '校验期间发生变化'):
+            self.runtime._check_installed_runtime()
+        self.assertNotIn('installed', self.runtime._apk_cache)
+
+    def test_verification_cache_is_bound_to_version_and_device_configuration(self):
+        from bridge import runtime
+        with tempfile.TemporaryDirectory() as directory, patch.object(runtime, 'RUNTIME_HOME', Path(directory)):
+            android = runtime.AndroidRuntime()
+            android._load_apk_cache()
+            android._apk_cache['installed'] = {'stat': 'verified'}
+            android._save_apk_cache()
+            for field, value in (('apk_sha256', 'f' * 64), ('preferred_serial', 'emulator-5558'),
+                                 ('config', {'avdHome': 'another device'})):
+                other = runtime.AndroidRuntime()
+                other._load_apk_cache()
+                self.assertIn('installed', other._apk_cache)
+                setattr(other, field, value)
+                other._load_apk_cache()
+                self.assertNotIn('installed', other._apk_cache)
+            (Path(directory) / 'apk-verification.json').write_text('incomplete')
+            android._load_apk_cache()
+            self.assertNotIn('installed', android._apk_cache)
+
+    def test_install_stamp_covers_apk_and_both_libraries_and_fails_closed(self):
+        from bridge.runtime import AndroidRuntime
+        android = AndroidRuntime.__new__(AndroidRuntime)
+        android._apk_cache = {};android.config = {'backend': 'android-sdk'};android.serial = 'emulator-5560'
+        line = '65029:270351:794673452:2026-10-10 00:31:13.152000000 +0000:2026-10-10 00:31:19.344000000 +0000'
+        android.command = Mock(return_value=SimpleNamespace(stdout='\n'.join([line] * 3), returncode=0))
+        self.assertIsNotNone(android._installed_apk_stamp(BASE))
+        self.assertEqual(android.command.call_args.args[-3:], (BASE, BASE.rsplit('/', 1)[0] + '/lib/arm64/libg.so',
+                                                              BASE.rsplit('/', 1)[0] + '/lib/arm64/libcrprobe.so'))
+        for output, code in ((line, 0), ('\n'.join([line] * 3), 1), ('malformed\n' * 3, 0)):
+            android.command.return_value = SimpleNamespace(stdout=output, returncode=code)
+            self.assertIsNone(android._installed_apk_stamp(BASE))
 
 
 if __name__ == "__main__":

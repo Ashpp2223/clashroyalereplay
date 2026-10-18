@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
-import gzip
 import json
 import os
 from pathlib import Path
@@ -35,6 +35,26 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def rgba_png(raw: bytes, *, compression: int = 1) -> bytes:
+    """Encode screencap pixels losslessly without launching a per-frame process."""
+    width, height, pixel_format = struct.unpack_from("<III", raw)
+    header = len(raw) - width * height * 4
+    if pixel_format != 1 or not (0 < width <= 8192 and 0 < height <= 8192) or header not in (12, 16):
+        raise ValueError("不支持的原生截图格式")
+    stride = width * 4
+    pixels = memoryview(raw)[header:]
+    rows = bytearray((stride + 1) * height)
+    for y in range(height):
+        # PNG filter 0 keeps all RGBA channels intact, including alpha.
+        rows[y * (stride + 1) + 1:(y + 1) * (stride + 1)] = pixels[y * stride:(y + 1) * stride]
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, compression)) + chunk(b"IEND", b""))
+
+
 def android_sdk() -> Path:
     for candidate in (os.environ.get("ANDROID_SDK_ROOT"), os.environ.get("ANDROID_HOME"),
                       str(Path.home() / "AppData" / "Local" / "Android" / "Sdk")):
@@ -58,9 +78,13 @@ class AndroidRuntime:
         self.error: str | None = None
         self.apk_sha256 = self._prepared_apk_hash()
         self.video: NativeFrameStream | None = None
-        self.frame_encoder: str | None = None
         self.owns_session = False
         self.runtime_fingerprint_sha256 = MANIFEST["runtime_fingerprint_sha256"]
+        self._verified_apk: Path | None = None
+        self._apk_cache: dict | None = None
+        self._ready_for_snapshot = False
+        self.apk_cache_hit = False
+        self.resumed_game = False
         config_path = RUNTIME_HOME / "runtime.json"
         self.config = json.loads(config_path.read_text(encoding="utf-8-sig")) if config_path.exists() else {}
         if self.config.get("sdkRoot") and not os.environ.get("ANDROID_SDK_ROOT") and not os.environ.get("ANDROID_HOME"):
@@ -94,6 +118,11 @@ class AndroidRuntime:
     def start(self) -> dict:
         self.stage = "检查环境"
         self.stage_code = "checking"
+        self._verified_apk = None
+        self._ready_for_snapshot = False
+        self.resumed_game = False
+        self.apk_cache_hit = False
+        self._load_apk_cache()
         if not self.adb.is_file():
             raise RuntimeError("未找到 ADB；请安装 Android platform-tools 或设置 CR_ADB")
         # Hash the local APK in the background startup, after the HTTP greeting.
@@ -103,6 +132,7 @@ class AndroidRuntime:
             path = Path(payload.get("path", ""))
             if not path.is_file() or sha256(path) != self.apk_sha256:
                 raise RuntimeError("本地准备的 APK 缺失或哈希不符")
+            self._verified_apk = path
         local_probe = VENDOR / "prebuilt" / "libcrprobe.so"
         if sha256(local_probe) != PROBE_SHA256:
             raise RuntimeError("本地探针哈希不符")
@@ -125,26 +155,20 @@ class AndroidRuntime:
         self.command("wait-for-device", timeout=30)
         if self.command("shell", "id", "-u").stdout.strip() != "0":
             raise RuntimeError("Android 运行环境的 ADB 尚无 root 权限")
-        if self.serial.startswith("emulator-") and self.config.get("backend") == "android-sdk":
-            # This dedicated development device must show the game rather than
-            # Android's first-run fullscreen instruction overlay.
-            self.command("shell", "settings", "--user", "0", "put", "secure", "immersive_mode_confirmations", "confirmed")
         self._check_installed_runtime()
         self.stage = "启动原生探针"
         self.stage_code = "probe"
         self.owns_session = True
         from .bootstrap_runtime import bootstrap
         from .engine_adapter import engine_port
-        bootstrap(str(self.adb), self.serial, port=engine_port(), timeout=90, verified=True)
+        resumed = bootstrap(str(self.adb), self.serial, port=engine_port(), timeout=90, verified=True,
+                            resume=bool(self.apk_cache_hit and self.process and getattr(self, '_using_quick_boot', False)))
+        self.resumed_game = bool(resumed.get('resumed'))
         self.stage = "读取能力声明"
         self.stage_code = "capabilities"
         attest = self._attest()
-        # Resolve the bundled encoder before the first node picture is requested.
-        try:
-            import imageio_ffmpeg
-            self.frame_encoder = imageio_ffmpeg.get_ffmpeg_exe()
-        except (ImportError, OSError, RuntimeError):
-            self.frame_encoder = None
+        self._ready_for_snapshot = True
+        self._save_apk_cache()
         self.video = NativeFrameStream(str(self.adb), self.serial)
         self.video.start()
         self.stage = "就绪"
@@ -152,7 +176,48 @@ class AndroidRuntime:
         self.error = None
         return attest
 
-    def _launch_sdk_emulator(self) -> None:
+    def _load_apk_cache(self) -> None:
+        # Unchanged APK/library files reuse their completed installation scan.
+        # Update assets and live probe attestation are still hashed every time.
+        identity = hashlib.sha256(json.dumps({
+            'apk': self.apk_sha256, 'probe': PROBE_SHA256, 'libg': MANIFEST['libg_sha256'],
+            'content': CONTENT_LOCK, 'config': self.config, 'serial': self.preferred_serial,
+        }, sort_keys=True).encode()).hexdigest()
+        record = {'schema': 'cr-apk-verification.v1', 'identity': identity}
+        try:
+            saved = json.loads((RUNTIME_HOME / 'apk-verification.json').read_text(encoding='utf-8'))
+            if isinstance(saved, dict) and all(saved.get(key) == value for key, value in record.items()):
+                record = saved
+        except (OSError, ValueError):
+            pass
+        self._apk_cache = record
+
+    def _installed_apk_stamp(self, path: str) -> dict | None:
+        if getattr(self, '_apk_cache', None) is None or self.config.get('backend') != 'android-sdk':
+            return None
+        try:
+            directory = path.rsplit('/', 1)[0]
+            result = self.command('shell', 'stat', '-c', '%d:%i:%s:%y:%z', path,
+                                  directory + '/lib/arm64/libg.so', directory + '/lib/arm64/libcrprobe.so', check=False)
+            value = result.stdout.strip()
+            lines = value.splitlines()
+            if result.returncode == 0 and len(lines) == 3 and all(re.fullmatch(r'\d+:\d+:\d+:[^\r\n]+', line) for line in lines):
+                return {'serial': self.serial, 'path': path, 'stat': value}
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return None
+
+    def _save_apk_cache(self) -> None:
+        try:
+            RUNTIME_HOME.mkdir(parents=True, exist_ok=True)
+            target = RUNTIME_HOME / 'apk-verification.json'
+            temporary = target.with_suffix('.partial')
+            temporary.write_text(json.dumps(self._apk_cache), encoding='utf-8')
+            temporary.replace(target)
+        except OSError:
+            pass  # An unwritable cache only means doing the checks next time.
+
+    def _launch_sdk_emulator(self, *, cold_boot: bool = False) -> None:
         if not self.preferred_serial.startswith("emulator-") or not self.emulator.is_file():
             raise RuntimeError("未找到选定的 Android 设备或官方开发模拟器")
         port = int(self.preferred_serial.removeprefix("emulator-"))
@@ -161,15 +226,18 @@ class AndroidRuntime:
         avd_home = Path(self.config.get("avdHome", str(RUNTIME_HOME / "avd")))
         if not (avd_home / (self.avd_name + ".ini")).is_file():
             raise RuntimeError("尚未连接战斗运行环境，请点击“设置运行环境”选择已有环境目录")
-        self.stage = "启动 Android 开发环境"
-        self.stage_code = "emulator"
+        snapshot = avd_home / (self.avd_name + '.avd') / 'snapshots/default_boot/snapshot.pb'
+        self._using_quick_boot = not cold_boot and snapshot.is_file()
+        self.stage = "快速启动未完成，正在完整启动 Android" if cold_boot else "启动 Android 开发环境"
+        self.stage_code = "emulator-cold" if cold_boot else "emulator"
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         log = RUNTIME_HOME / "dev-emulator.log"
         log.parent.mkdir(parents=True, exist_ok=True)
         with log.open("ab") as output:
             self.process = subprocess.Popen(
                 [str(self.emulator), "-avd", self.avd_name, "-port", str(port), "-no-window", "-noaudio",
-                 "-no-metrics", "-gpu", self.config.get("gpu", "host"), "-memory", "2048", "-cores", "2"],
+                 "-no-metrics", "-gpu", self.config.get("gpu", "host"), "-memory", "2048", "-cores", "2",
+                 *(['-no-snapshot-load'] if cold_boot else [])],
                 env={**os.environ, "ANDROID_AVD_HOME": str(avd_home)}, stdout=output, stderr=output, creationflags=flags)
 
     def _connect_selected_device(self) -> None:
@@ -190,21 +258,32 @@ class AndroidRuntime:
                            text=True, encoding="utf-8", errors="replace", timeout=10, check=False)
 
     def _find_arm64_device(self) -> str | None:
-        devices = subprocess.run([str(self.adb), "devices"], capture_output=True,
-                                 text=True, encoding="utf-8", errors="replace", timeout=15, check=True).stdout
+        try:
+            listing = subprocess.run([str(self.adb), "devices"], capture_output=True,
+                                     text=True, encoding="utf-8", errors="replace", timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if listing.returncode:
+            return None  # ADB can briefly restart while Quick Boot reconnects.
+        devices = listing.stdout
         preferred = self.preferred_serial
         for line in devices.splitlines()[1:]:
             parts = line.split()
             if len(parts) < 2 or parts[1] != "device" or (preferred and parts[0] != preferred):
                 continue
-            result = subprocess.run([str(self.adb), "-s", parts[0], "shell", "getprop", "ro.product.cpu.abilist"],
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8, check=False)
-            if "arm64-v8a" in result.stdout.strip().split(","):
+            try:
+                result = subprocess.run([str(self.adb), "-s", parts[0], "shell", "getprop", "ro.product.cpu.abilist"],
+                                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8, check=False)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode == 0 and "arm64-v8a" in result.stdout.strip().split(","):
                 return parts[0]
         return None
 
     def _wait_for_avd(self, timeout: float) -> str:
-        deadline = time.monotonic() + timeout
+        started = time.monotonic()
+        deadline = started + timeout
+        retried = False
         while time.monotonic() < deadline:
             self._connect_selected_device()
             serial = self._find_arm64_device()
@@ -212,6 +291,13 @@ class AndroidRuntime:
                 return serial
             if self.process and self.process.poll() is not None:
                 raise RuntimeError(f"开发模拟器启动失败（{self.process.returncode}）；详情见 .local-runtime/dev-emulator.log")
+            if (self.process and getattr(self, '_using_quick_boot', False) and not retried and
+                    time.monotonic() - started >= 45):
+                # Only restart the emulator this runtime launched. Existing
+                # user-owned devices and first-ever cold boots keep their budget.
+                self._stop_owned_emulator(timeout=5)
+                self._launch_sdk_emulator(cold_boot=True)
+                retried = True
             time.sleep(1)
         raise TimeoutError("模拟器启动超时")
 
@@ -235,16 +321,23 @@ class AndroidRuntime:
         if not base_apk:
             raise RuntimeError("请先安装未修改的原版游戏，并完成游戏内资源更新")
         directory = base_apk.rsplit("/", 1)[0]
-        if self.command("shell", "sha256sum", directory + "/lib/arm64/libg.so").stdout.split()[0] != MANIFEST["libg_sha256"]:
+        stamp = self._installed_apk_stamp(base_apk)
+        cached = stamp is not None and self._apk_cache.get('installed') == stamp
+        if not cached and self.command("shell", "sha256sum", directory + "/lib/arm64/libg.so").stdout.split()[0] != MANIFEST["libg_sha256"]:
             raise RuntimeError("已安装的 libg.so 与固定引擎版本不符")
         self.stage = "校验游戏资源"
         self.stage_code = "resources"
-        self._check_updated_content()
-        installed = self.command("shell", "sha256sum", base_apk, timeout=120).stdout.split()[0] == self.apk_sha256
+        # The first scan overlaps APK hashing and resource verification. Later
+        # scans reuse only the unchanged installed APK; update files stay live.
+        with ThreadPoolExecutor(max_workers=1) as verification:
+            apk_check = None if cached else verification.submit(self.command, "shell", "sha256sum", base_apk, timeout=120)
+            self._check_updated_content()
+            installed = cached or apk_check.result().stdout.split()[0] == self.apk_sha256
         if not installed:
             self._install_local_prepared()
             base_apk = self.command("shell", "pm", "path", package).stdout.strip().removeprefix("package:")
             directory = base_apk.rsplit("/", 1)[0]
+            stamp = self._installed_apk_stamp(base_apk)
         checks = {
             "APK": (base_apk, self.apk_sha256),
             "libg": (directory + "/lib/arm64/libg.so", MANIFEST["libg_sha256"]),
@@ -253,12 +346,22 @@ class AndroidRuntime:
         for label, (path, expected) in checks.items():
             # APK and libg were already checked above. Installing a replacement
             # invalidates those results, so all three are then verified again.
-            if installed and label in ("APK", "libg"):
+            if cached or (installed and label in ("APK", "libg")):
                 continue
             result = self.command("shell", "sha256sum", path, timeout=120 if label == "APK" else 30, check=False)
             actual = result.stdout.split()[0].lower() if result.stdout.split() else ""
             if actual != expected:
                 raise RuntimeError(f"{label} 哈希不符或文件缺失：{actual or '未找到'}")
+        if stamp is not None:
+            if self._installed_apk_stamp(base_apk) != stamp:
+                raise RuntimeError('已安装的 APK 在校验期间发生变化')
+            self._apk_cache['installed'] = stamp
+            self.apk_cache_hit = cached
+        if (not cached and getattr(self, 'serial', '').startswith('emulator-') and
+                getattr(self, 'config', {}).get('backend') == 'android-sdk'):
+            # This initial Android setting persists with the device; do not
+            # repeat setup writes during every subsequent connection.
+            self.command('shell', 'settings', '--user', '0', 'put', 'secure', 'immersive_mode_confirmations', 'confirmed')
 
     def _install_local_prepared(self) -> None:
         if not self.serial or not (self.serial.startswith("emulator-") or self.serial.startswith("127.0.0.1:")):
@@ -282,7 +385,11 @@ class AndroidRuntime:
         hashes = resource_hashes(device, required_only=True)
         hashes = recover_pending_downloads(device, hashes)
         try:
-            validate_resources(hashes, base_asset_hashes(device, hashes, apk_path(device)))
+            # The installed APK must have a completed pinned hash check for its
+            # current file identity. Verified bytes on the host avoid four
+            # guest unzip scans of the ~800 MB archive for tiny fallback assets.
+            source = getattr(self, '_verified_apk', None) or apk_path(device)
+            validate_resources(hashes, base_asset_hashes(device, hashes, source))
         except ValueError as error:
             if hashes.get("fingerprint.json") in CONTENT_LOCK["fingerprints"]:
                 raise RuntimeError(str(error)) from error
@@ -336,32 +443,16 @@ class AndroidRuntime:
     def frame_png(self) -> bytes:
         if not self.serial:
             raise RuntimeError("模拟器未启动")
-        # Android's PNG encoder dominates paused-node display latency. Transfer
-        # lightly compressed pixels and encode on the host, keeping a fresh capture.
+        # Loopback ADB transfers raw pixels faster than compressing them inside
+        # Android. PNG level 0 also avoids recompressing the same fresh pixels.
         try:
-            if not self.frame_encoder:
-                raise RuntimeError("截图编码器不可用")
             result = subprocess.run(
-                [str(self.adb), "-s", self.serial, "exec-out", "sh", "-c", "screencap | gzip -1"],
+                [str(self.adb), "-s", self.serial, "exec-out", "screencap"],
                 capture_output=True, timeout=5, check=True,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            raw = gzip.decompress(result.stdout)
-            width, height, pixel_format = struct.unpack_from("<III", raw)
-            header = len(raw) - width * height * 4
-            if pixel_format != 1 or not (0 < width <= 8192 and 0 < height <= 8192) or header not in (12, 16):
-                raise ValueError("不支持的原生截图格式")
-            encoded = subprocess.run(
-                [self.frame_encoder, "-hide_banner", "-loglevel", "error",
-                 "-threads", "1", "-f", "rawvideo", "-pixel_format", "rgba",
-                 "-video_size", f"{width}x{height}", "-i", "pipe:0", "-frames:v", "1",
-                 "-threads", "1", "-compression_level", "6", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
-                input=raw[header:], capture_output=True, timeout=5, check=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if not encoded.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
-                raise ValueError("截图编码失败")
-            return encoded.stdout
+            return rgba_png(result.stdout, compression=0)
         except (OSError, ValueError, EOFError, struct.error, zlib.error, subprocess.SubprocessError, ImportError, RuntimeError):
-            # Older devices and unavailable host decoders retain the PNG path.
+            # Older devices retain Android's PNG capture as a fallback.
             pass
         result = subprocess.run([str(self.adb), "-s", self.serial, "exec-out", "screencap", "-p"],
                                 capture_output=True, timeout=10, check=True,
@@ -384,18 +475,48 @@ class AndroidRuntime:
             self.video = None
         if self.owns_session and self.serial:
             from .bootstrap_runtime import shutdown
-            from .engine_adapter import engine_port
+            from .engine_adapter import engine_port, new_engine
+            preserve_game = False
+            if getattr(self, '_ready_for_snapshot', False) and self.process and self.process.poll() is None:
+                engine = new_engine()
+                engine.timeout = 3
+                try:
+                    paused = engine.request('pause')
+                    cleared = engine.request('replay-schedule-clear')
+                    preserve_game = bool(paused.get('ok') and cleared.get('ok'))
+                except (OSError, ValueError, RuntimeError):
+                    pass
+                finally:
+                    engine.close()
             try:
-                shutdown(str(self.adb), self.serial, port=engine_port())
+                shutdown(str(self.adb), self.serial, port=engine_port(), preserve_game=preserve_game)
             except (OSError, subprocess.SubprocessError):
                 pass  # An exited Android process no longer owns live probe state.
             self.owns_session = False
-        if self.process and self.process.poll() is None:
-            if self.serial:
-                self.command("emu", "kill", timeout=10, check=False)
+        self._ready_for_snapshot = False
+        self._stop_owned_emulator()
+
+    def _stop_owned_emulator(self, *, timeout: float = 45) -> None:
+        process = self.process
+        if process and process.poll() is None:
+            # A failed Quick Boot may never have set self.serial. Its owned
+            # emulator console can still be addressed using the requested serial.
             try:
-                self.process.wait(timeout=45)
+                subprocess.run([str(self.adb), '-s', self.serial or self.preferred_serial, 'emu', 'kill'],
+                               capture_output=True, timeout=5, check=False,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.SubprocessError):
+                pass
+            try:
+                process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
-                self.process.terminate()
-                self.process.wait(timeout=5)
+                if os.name == 'nt':
+                    # emulator.exe owns a QEMU child; terminating only its
+                    # launcher leaves an offline device that prevents retries.
+                    subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                   capture_output=True, timeout=5, check=False,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                else:
+                    process.terminate()
+                process.wait(timeout=5)
         self.process = None

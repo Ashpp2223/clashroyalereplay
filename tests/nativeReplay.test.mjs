@@ -10,6 +10,7 @@ import {
   deleteNativeSubtree,
   nativeActionsToNode,
   nearestNativeSnapshotNode,
+  canReuseNativeSnapshot,
   STANDARD_NATIVE_DECK,
   NATIVE_CARD_CATALOG,
   nativeDeckSpecialSlots,
@@ -18,6 +19,37 @@ import {
   DEFAULT_NATIVE_TOWER,
   validateNativeProject
 } from "../src/domain/nativeReplay.ts";
+import {configureNativeCatalog,validateNativeDeck,validateNativeTower,projectForCurrentEngine} from "../src/domain/nativeReplay.ts";
+import cnProfile from '../src/data/cnEngineProfile.json' with {type:'json'};
+
+test('CN and legacy archives validate against their own rules after switching the active engine',()=>{
+  const oldIdentity={upstreamCommit:'legacy',probeSha256:'probe',apkSha256:'apk',libgSha256:'old',runtimeFingerprintSha256:'old',protocolVersion:'native-bridge.v1',cropProfileId:'stock'};
+  const match={seed:41,preset:'standard',deck0:[...STANDARD_NATIVE_DECK],deck1:[...STANDARD_NATIVE_DECK]};
+  const legacy=createNativeProject(oldIdentity,{...match,tower0:159000000,tower1:159000004},90,'old');
+  try {
+    configureNativeCatalog(cnProfile.catalog,cnProfile.identity);
+    assert.doesNotThrow(()=>validateNativeTower(169000004));
+    for(const id of [26000023,26000042]) {
+      const card=cnProfile.catalog.cards.find(card=>card.id===id);
+      assert(card.forms&2,'New CN heroes must come from current native evidence');
+      assert(card.heroImage&&card.abilityNames.length);
+      assert.doesNotThrow(()=>validateNativeForms([id,...STANDARD_NATIVE_DECK.slice(1)],[2,0,0,0,0,0,0,0]));
+    }
+    assert.throws(()=>validateNativeTower(159000000));
+    assert.doesNotThrow(()=>validateNativeProject(legacy));
+    const deck=[26000107,...STANDARD_NATIVE_DECK.slice(1)];
+    assert.doesNotThrow(()=>validateNativeDeck(deck));
+    const cn=createNativeProject(cnProfile.identity,{...match,preset:'custom',deck0:deck,tower0:169000000,tower1:169000004,level:11},90,'cn');
+    assert.doesNotThrow(()=>validateNativeProject(JSON.parse(JSON.stringify(cn))));
+    assert.throws(()=>projectForCurrentEngine(legacy,cnProfile.identity),/引擎版本/);
+    configureNativeCatalog(undefined,oldIdentity);
+    assert.doesNotThrow(()=>validateNativeProject(cn));
+    assert.throws(()=>validateNativeTower(169000000));
+    assert.throws(()=>validateNativeDeck(deck));
+    const bad={...cn,engine:{...cn.engine,runtimeFingerprintSha256:'unknown'}};
+    assert.throws(()=>validateNativeProject(bad),/规则版本/);
+  } finally {configureNativeCatalog(undefined,oldIdentity);}
+});
 
 const identity = {
   upstreamCommit: "f92ccbec",
@@ -153,6 +185,32 @@ test("time seek chooses the nearest cached ancestor, never a sibling or future n
   assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 90, cached)?.id, root.rootNodeId);
   assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 130, cached)?.id, two.node.id);
   assert.equal(nearestNativeSnapshotNode(sibling.project, two.node.id, 120, new Set([sibling.node.id])), null);
+});
+
+test('reopening preserves snapshots only for the same engine, match and full node history', () => {
+  const root = createNativeProject(identity, match, 90, 'root');
+  const child = createNativeCheckpoint(root, advanceNativeWork(checkoutNativeNode(root, root.rootNodeId), 100), 'child');
+  const project = child.project;
+  const changed = () => structuredClone(project);
+  const metadata = changed();
+  metadata.nodes[root.rootNodeId].note = '备注';
+  metadata.layout[child.node.id] = {x:100,y:200};
+  assert(canReuseNativeSnapshot(project, metadata, child.node.id));
+  for (const mutate of [
+    p => { p.projectId = 'another-project'; },
+    p => { p.engine.probeSha256 = 'another-probe'; },
+    p => { p.match.level = 11; },
+    p => { p.nodes[root.rootNodeId].stateDigest = 'changed-root'; },
+    p => { p.nodes[child.node.id].finalTick++; },
+    p => { p.nodes[child.node.id].actionsFromParent = [play(91, 1)]; },
+    p => { delete p.nodes[child.node.id]; }
+  ]) {
+    const next = changed(); mutate(next);
+    assert.equal(canReuseNativeSnapshot(project, next, child.node.id), false);
+  }
+  const branch = changed();
+  branch.nodes[child.node.id].stateDigest = 'changed-child';
+  assert(canReuseNativeSnapshot(project, branch, root.rootNodeId));
 });
 
 test("unsupported abilities, cards, seeds and missing engine identity are rejected before replay", () => {
