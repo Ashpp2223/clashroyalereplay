@@ -2,6 +2,7 @@ import { NativeUiError } from "./errors.ts";
 import nativeCards from "../data/nativeCards.json" with { type: "json" };
 import nativeTowerCards from "../data/nativeTowerCards.json" with { type: "json" };
 import cnEngineProfile from "../data/cnEngineProfile.json" with { type: "json" };
+import clashbackEngineProfile from "../data/clashbackEngineProfile.json" with { type: "json" };
 export interface NativeCardDefinition {
   id:number;name:string;engineName:string;cost:number;kind:string;image:string|null;
   rarity:'common'|'rare'|'epic'|'legendary'|'champion';
@@ -31,6 +32,11 @@ export function configureNativeCatalog(catalog:NativeEngineCatalog|undefined,ide
 }
 
 function catalogForEngine(identity:EngineIdentity):NativeEngineCatalog {
+  if(identity.protocolVersion===clashbackEngineProfile.identity.protocolVersion){
+    if(identity.libgSha256!==clashbackEngineProfile.identity.libgSha256 || identity.runtimeFingerprintSha256!==clashbackEngineProfile.identity.runtimeFingerprintSha256)
+      throw new NativeUiError('engineMismatch','未知 Clashback 规则版本');
+    return clashbackEngineProfile.catalog as NativeEngineCatalog;
+  }
   if(identity.protocolVersion==='cr-camp-control.v1'){
     if(identity.libgSha256!==cnEngineProfile.identity.libgSha256 || identity.runtimeFingerprintSha256!==cnEngineProfile.identity.runtimeFingerprintSha256)
       throw new NativeUiError('engineMismatch','未知国服规则版本');
@@ -181,8 +187,12 @@ function lockNativeMatch(match:NativeMatchConfig):NativeMatchConfig {
 export function projectForCurrentEngine(project:NativeReplayProject, identity:EngineIdentity): {project:NativeReplayProject; upgraded:boolean} {
   if(Object.entries(identity).every(([key,value])=>project.engine[key as keyof EngineIdentity]===value)) return {project,upgraded:false};
   const old=project.engine;
+  const clashbackPauseFix=old.probeSha256==='ec13f107ac24c9c0376352be39888198d337394fc17f4d9cb5ac61fad3ad262a' &&
+    identity.probeSha256==='c185abe434a9ab6e6c65f14b3ce6bc3d9d6f6c21de71b0e13ac753f650389873' &&
+    Object.entries(clashbackEngineProfile.identity).every(([key,value])=>identity[key as keyof EngineIdentity]===value) &&
+    Object.entries(identity).every(([key,value])=>key==='probeSha256'||old[key as keyof EngineIdentity]===value);
   const known = old.probeSha256==='97044a901f4eaef335e09014631bd2ac7bd3d9701a7522c0c7b761413c7b2028' && old.apkSha256==='c7e32cdfe5486d0432562320d1c3bd3265faf2891bd3f7658fe4a7dc4aca4ced';
-  if(!known || ['upstreamCommit','libgSha256','runtimeFingerprintSha256','protocolVersion','cropProfileId'].some(key=>old[key as keyof EngineIdentity]!==identity[key as keyof EngineIdentity]) || project.match.preset!=='standard' || [...(project.match.forms0??[]),...(project.match.forms1??[])].some(Boolean)) throw new NativeUiError("engineMismatch", "项目的引擎版本不匹配");
+  if(!clashbackPauseFix && (!known || ['upstreamCommit','libgSha256','runtimeFingerprintSha256','protocolVersion','cropProfileId'].some(key=>old[key as keyof EngineIdentity]!==identity[key as keyof EngineIdentity]) || project.match.preset!=='standard' || [...(project.match.forms0??[]),...(project.match.forms1??[])].some(Boolean))) throw new NativeUiError("engineMismatch", "项目的引擎版本不匹配");
   return {project:{...project, projectId:crypto.randomUUID(),title:project.title+'（升级副本）',updatedAt:new Date().toISOString(),engine:{...identity}},upgraded:true};
 }
 

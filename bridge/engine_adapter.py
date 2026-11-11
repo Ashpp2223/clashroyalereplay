@@ -38,16 +38,24 @@ def engine_port():
 
 
 def cn_profile_enabled():
+    return selected_profile() == 'cn-38.4.5'
+
+
+def selected_profile():
     profile = os.environ.get('CR_ENGINE_PROFILE', 'legacy')
-    if profile not in ('legacy', 'cn-38.4.5'):
+    if profile not in ('legacy', 'cn-38.4.5', 'clashback-160635001'):
         raise ValueError('未知战斗引擎配置')
-    return profile == 'cn-38.4.5'
+    return profile
 
 
 def new_runtime():
-    if cn_profile_enabled():
+    profile = selected_profile()
+    if profile == 'cn-38.4.5':
         from .cn_engine import CampRuntime
         return CampRuntime()
+    if profile == 'clashback-160635001':
+        from .clashback_engine import ClashbackRuntime
+        return ClashbackRuntime()
     from .runtime import AndroidRuntime
     return AndroidRuntime()
 

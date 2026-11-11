@@ -18,6 +18,8 @@ def main():
             (ROOT / "src/data/nativeCards.json", "src/data"),
             (ROOT / "src/data/nativeTowerCards.json", "src/data"),
             (ROOT / "src/data/cnEngineProfile.json", "src/data"),
+            (ROOT / "src/data/clashbackEngineProfile.json", "src/data"),
+            (ROOT / "bridge/clashback_worker.py", "bridge"),
             (VENDOR / "standard_match.json", "vendor/clash-royale-battle-engine"),
             (VENDOR / "vendor/firstlight/supported_engine.json", "vendor/clash-royale-battle-engine/vendor/firstlight"),
             (VENDOR / "prebuilt/libcrprobe.so", "vendor/clash-royale-battle-engine/prebuilt"),

@@ -12,9 +12,13 @@ TOWER_CARDS = json.loads((ROOT / 'src/data/nativeTowerCards.json').read_text(enc
 TOWER_IDS = {card['id'] for card in TOWER_CARDS}
 DEFAULT_TOWER = 159000000
 
-from .engine_adapter import cn_profile_enabled
-if cn_profile_enabled():
+from .engine_adapter import selected_profile
+_profile = selected_profile()
+if _profile == 'cn-38.4.5':
     from .cn_engine import load_profile
+elif _profile == 'clashback-160635001':
+    from .clashback_engine import load_profile
+if _profile != 'legacy':
     _catalog = load_profile()['catalog']
     CARDS = _catalog['cards']
     CARD_IDS = {card['id'] for card in CARDS}

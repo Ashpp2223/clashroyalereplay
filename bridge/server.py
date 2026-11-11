@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .controller import BattleController
 from .runtime import AndroidRuntime
-from .engine_adapter import new_runtime
+from .engine_adapter import new_engine, new_runtime
 from .setup import SetupManager
 
 
@@ -162,17 +162,28 @@ class BridgeRequest(BaseHTTPRequestHandler):
             elif path == "/v1/observe":
                 self._send(200, self.server.controller.observe())
             elif path == "/v1/frame":
+                frame_runtime = self.server.controller.runtime
+                frame_session = getattr(frame_runtime, 'folder', None)
                 if parse_qs(urlparse(self.path).query).get('fresh') == ['1']:
-                    frame, format_name = self.server.controller.runtime.frame(fresh=True)
+                    frame, format_name = frame_runtime.frame(fresh=True)
                 else:
-                    frame, format_name = self.server.controller.runtime.frame()
+                    frame, format_name = frame_runtime.frame()
                 self._send(200, frame, format_name)
             else:
                 self._send(404, {"error": "not found"})
         except Exception as error:
-            self._record_failure(path, error)
-            if path in ("/v1/frame", "/v1/observe"):
-                self.server.controller.suspend("画面或战斗连接中断，已暂停")
+            controller = self.server.controller
+            with controller.lock:
+                # A cancelled old capture must not suspend a newly reset battle.
+                # Check under the same lock as reset and suspend, after any
+                # pending battle replacement has completed.
+                obsolete = path == '/v1/frame' and (
+                    frame_runtime is not controller.runtime or
+                    frame_session != getattr(frame_runtime, 'folder', None))
+                if not obsolete:
+                    self._record_failure(path, error)
+                    if path in ("/v1/frame", "/v1/observe"):
+                        controller.suspend("画面或战斗连接中断，已暂停")
             self._send(409, {"error": str(error)})
 
     def do_POST(self) -> None:
@@ -272,7 +283,8 @@ def main() -> None:
     token = os.environ.get("CR_BRIDGE_TOKEN")
     if not token or len(token) < 32:
         raise SystemExit("CR_BRIDGE_TOKEN is required")
-    server = BridgeServer(arguments.port, token, BattleController(new_runtime()))
+    runtime = new_runtime()
+    server = BridgeServer(arguments.port, token, BattleController(runtime, getattr(runtime, "create_engine", new_engine)))
     print(json.dumps({"port": server.server_address[1], "protocol": "native-bridge.v1"}), flush=True)
     if arguments.parent_stdin:
         def parent_watch():

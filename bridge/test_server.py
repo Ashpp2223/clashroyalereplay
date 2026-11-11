@@ -171,6 +171,23 @@ class ServerTest(unittest.TestCase):
                 self.assertEqual(response.read(),expected)
         self.assertEqual(calls,[False,True])
 
+    def test_obsolete_frame_failure_does_not_pause_a_new_battle(self):
+        controller = self.server.controller
+        controller.playing = True
+        controller.suspend = Mock()
+
+        def obsolete_frame():
+            controller.runtime.folder = 'new-battle'
+            raise RuntimeError('old frame pipe was closed')
+
+        controller.runtime = SimpleNamespace(folder='old-battle', frame=obsolete_frame)
+        request = Request(self.base + '/v1/frame', headers={'Authorization': 'Bearer ' + 'a' * 64})
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request, timeout=2)
+        self.assertEqual(error.exception.code, 409)
+        controller.suspend.assert_not_called()
+        self.assertIsNone(self.server.last_failure)
+
     def test_frame_connection_is_reused_after_cors_preflight(self):
         self.server.controller.runtime = SimpleNamespace(frame=lambda: (b"frame", "image/jpeg"))
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)

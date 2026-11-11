@@ -12,22 +12,29 @@ async function freePort() {
 }
 
 export async function openDesktopHarness({app,home,runtime,devUrl,engineProfile='legacy'}) {
-  if(!['legacy','cn-38.4.5'].includes(engineProfile))throw new Error('Unknown test engine profile');
+  if(!['legacy','cn-38.4.5','clashback-160635001'].includes(engineProfile))throw new Error('Unknown test engine profile');
   if(devUrl&&!/^http:\/\/127\.0\.0\.1:1420\/?$/.test(devUrl))throw new Error('Development preview must use the local project server');
   app=resolve(app);home=resolve(home);runtime=resolve(runtime);
   await access(app);
   if(!devUrl)await access(join(dirname(app),'native-bridge','native-bridge.exe'));
   await mkdir(join(home,'runtime'),{recursive:true});
   await mkdir(join(home,'screenshots'),{recursive:true});
-  const settings=JSON.parse(await readFile(join(runtime,'runtime.json'),'utf8'));
   const cn=engineProfile==='cn-38.4.5';
-  if(cn ? settings.serial!=='emulator-5572'||settings.avdName!=='CR_Camp_Research_API31' : settings.serial!=='emulator-5560')throw new Error('Desktop acceptance device does not match its engine profile');
-  await writeFile(join(home,'runtime','runtime.json'),JSON.stringify(settings));
-  if(!cn)await copyFile(join(runtime,'prepared.json'),join(home,'runtime','prepared.json'));
+  const clashback=engineProfile==='clashback-160635001';
+  if(clashback){
+    await access(join(runtime,'avd','CR_Clashback_160635001.ini'));
+    await access(join(runtime,'packed-game','manifest.json'));
+  }else{
+    const settings=JSON.parse(await readFile(join(runtime,'runtime.json'),'utf8'));
+    if(cn ? settings.serial!=='emulator-5572'||settings.avdName!=='CR_Camp_Research_API31' : settings.serial!=='emulator-5560')throw new Error('Desktop acceptance device does not match its engine profile');
+    await writeFile(join(home,'runtime','runtime.json'),JSON.stringify(settings));
+    if(!cn)await copyFile(join(runtime,'prepared.json'),join(home,'runtime','prepared.json'));
+  }
   const port=await freePort();
   const process=spawn(app,[],{windowsHide:true,stdio:'ignore',env:{...globalThis.process.env,
     CR_DESKTOP_TEST_HOME:home,CR_ENGINE_PORT:cn?'26791':'26790',CR_ENGINE_PROFILE:engineProfile,
-    ...(cn?{CR_CAMP_RESEARCH_ROOT:dirname(runtime)}:{}),WEBVIEW2_USER_DATA_FOLDER:join(home,'webview'),
+    ...(cn?{CR_CAMP_RESEARCH_ROOT:dirname(runtime)}:{}),
+    ...(clashback?{CR_CLASHBACK_ROOT:runtime}:{}),WEBVIEW2_USER_DATA_FOLDER:join(home,'webview'),
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-address=127.0.0.1 --remote-debugging-port=${port} --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows`}});
   let browser,page;
   try {

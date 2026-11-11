@@ -21,6 +21,28 @@ import {
 } from "../src/domain/nativeReplay.ts";
 import {configureNativeCatalog,validateNativeDeck,validateNativeTower,projectForCurrentEngine} from "../src/domain/nativeReplay.ts";
 import cnProfile from '../src/data/cnEngineProfile.json' with {type:'json'};
+import clashbackProfile from '../src/data/clashbackEngineProfile.json' with {type:'json'};
+
+test('the verified Clashback pause fix upgrades a copy without changing history or rules',()=>{
+  const old={...clashbackProfile.identity,probeSha256:'ec13f107ac24c9c0376352be39888198d337394fc17f4d9cb5ac61fad3ad262a'};
+  const current={...old,probeSha256:'c185abe434a9ab6e6c65f14b3ce6bc3d9d6f6c21de71b0e13ac753f650389873'};
+  configureNativeCatalog(clashbackProfile.catalog,current);
+  try {
+    const deck=[26000107,26000003,26000001,26000005,28000001,28000000,26000014,28000006];
+    const project=createNativeProject(old,{seed:41,preset:'custom',deck0:deck,deck1:deck,
+      forms0:[0,1,0,0,0,0,0,1],forms1:[0,1,0,0,0,0,0,1],level:16},1,'original-digest');
+    const original=JSON.stringify(project);
+    const upgraded=projectForCurrentEngine(project,current);
+    assert(upgraded.upgraded);
+    assert.notEqual(upgraded.project.projectId,project.projectId);
+    assert.deepEqual(upgraded.project.nodes,project.nodes);
+    assert.deepEqual(upgraded.project.match,project.match);
+    assert.equal(JSON.stringify(project),original);
+    for(const key of ['apkSha256','libgSha256','runtimeFingerprintSha256','upstreamCommit','protocolVersion','cropProfileId','probeSha256']){
+      assert.throws(()=>projectForCurrentEngine(project,{...current,[key]:'unknown'}),/引擎版本/);
+    }
+  } finally { configureNativeCatalog(undefined,{protocolVersion:'native-bridge.v1'}); }
+});
 
 test('CN and legacy archives validate against their own rules after switching the active engine',()=>{
   const oldIdentity={upstreamCommit:'legacy',probeSha256:'probe',apkSha256:'apk',libgSha256:'old',runtimeFingerprintSha256:'old',protocolVersion:'native-bridge.v1',cropProfileId:'stock'};
@@ -61,6 +83,21 @@ const identity = {
   cropProfileId: "1080x1920"
 };
 const match = { seed: 41, preset: "standard", deck0: [...STANDARD_NATIVE_DECK], deck1: [...STANDARD_NATIVE_DECK] };
+
+test('Clashback archives retain the Giant and Mirror evolutions across engine switches',()=>{
+  const deck=[26000003,26000107,26000001,26000005,28000001,28000000,26000014,28000006];
+  const forms=[1,0,0,0,0,0,0,1];
+  try {
+    configureNativeCatalog(clashbackProfile.catalog,clashbackProfile.identity);
+    assert.doesNotThrow(()=>validateNativeForms(deck,forms));
+    const project=createNativeProject(clashbackProfile.identity,{...match,preset:'custom',deck0:deck,forms0:forms},1,'clashback');
+    configureNativeCatalog(undefined,identity);
+    assert.deepEqual(validateNativeProject(project).match.forms0,forms);
+    assert.throws(()=>projectForCurrentEngine(project,identity),/引擎版本/);
+    const bad={...project,engine:{...project.engine,runtimeFingerprintSha256:'unknown'}};
+    assert.throws(()=>validateNativeProject(bad),/规则版本/);
+  } finally {configureNativeCatalog(undefined,identity);}
+});
 
 test('card collection sorts by elixir, then rarity, with stable ties',()=>{
   const rarity=['common','rare','epic','legendary','champion'];

@@ -164,8 +164,13 @@ class BattleController:
                 tower_options = {} if towers == (DEFAULT_TOWER,DEFAULT_TOWER) else {'tower0':towers[0],'tower1':towers[1]}
                 state = (engine.reset(seed=seed, warmup_speed=self.replay_speed) if configured_decks == (STANDARD_DECK, STANDARD_DECK) and not any(any(side) for side in configured_forms) and level is None and not tower_options
                          else engine.reset(seed=seed, deck0=list(configured_decks[0]), deck1=list(configured_decks[1]), forms0=list(configured_forms[0]), forms1=list(configured_forms[1]), level=level, warmup_speed=self.replay_speed, **tower_options))
-                if deal_mode is None or ordered_deal(state)==decks:break
-                configured_decks,configured_forms=remap_deal(configured_decks,configured_forms,ordered_deal(state),decks)
+                if deal_mode is None:
+                    break
+                actual = ordered_deal(state)
+                matches_deal = getattr(engine, "matches_deal", None)
+                if actual == decks or (matches_deal and matches_deal(actual, decks)):
+                    break
+                configured_decks,configured_forms=remap_deal(configured_decks,configured_forms,actual,decks)
             else:
                 raise RuntimeError('初始牌序未通过原生引擎校验，请调整待抽顺序')
             self.seed = seed
